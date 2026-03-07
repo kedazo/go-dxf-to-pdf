@@ -64,6 +64,7 @@ dxf-to-pdf input.dxf --list-layers
 | `--tile` | | Tile drawing across multiple pages |
 | `--crop` | | Crop to bounding box: `minX,minY,maxX,maxY` |
 | `--dwg-2-dxf` | *(auto)* | Path to `dwg2dxf` binary |
+| `--font-dir` | *(see below)* | Directory containing DejaVuSans*.ttf font files |
 | `--info` | | Print drawing metadata and exit |
 | `--list-layers` | | List all layers and exit |
 
@@ -79,11 +80,22 @@ On Debian/Ubuntu:
 sudo apt install libredwg-utils
 ```
 
-## System Requirements
+## Fonts
 
-- **DejaVu Sans font** — required for Unicode text rendering
-  - Path: `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf`
-  - Install: `sudo apt install fonts-dejavu-core`
+The tool requires DejaVu Sans TTF font files for text rendering. Place these files in the font directory:
+
+- `DejaVuSans.ttf`
+- `DejaVuSans-Bold.ttf`
+- `DejaVuSans-Oblique.ttf`
+- `DejaVuSans-BoldOblique.ttf`
+
+**Default font directory:**
+- **Linux:** `/usr/share/fonts/truetype/dejavu` (install: `sudo apt install fonts-dejavu-core`)
+- **Windows:** the directory containing the `dxf-to-pdf.exe` binary
+
+Override with `--font-dir /path/to/fonts`.
+
+Download fonts: https://dejavu-fonts.github.io/Download.html
 
 ## License
 

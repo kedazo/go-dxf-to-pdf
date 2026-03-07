@@ -21,6 +21,7 @@ type CLI struct {
 	DebugBBox bool   `help:"Draw red bounding box rectangle on the PDF for debugging."`
 	Crop      string `optional:"" help:"Crop to bounding box in drawing units: minX,minY,maxX,maxY"`
 	AutoPaper bool   `help:"Auto-size paper to fit drawing at the given scale."`
+	FontDir   string `optional:"" help:"Directory containing DejaVuSans*.ttf font files (default: /usr/share/fonts/truetype/dejavu on Linux, executable dir on Windows)."`
 
 	Info       bool `help:"Print drawing info (units, size, entity count, blocks) and exit."`
 	ListLayers bool `help:"List all layers and exit."`
@@ -106,6 +107,7 @@ func main() {
 		DebugBBox: cli.DebugBBox,
 		Crop:      cli.Crop,
 		AutoPaper: cli.AutoPaper,
+		FontDir:   cli.FontDir,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

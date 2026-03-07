@@ -2,6 +2,9 @@ package converter
 
 import (
 	"math"
+	"os"
+	"path/filepath"
+	"runtime"
 
 	"github.com/go-pdf/fpdf"
 )
@@ -11,7 +14,21 @@ type Renderer struct {
 	transform Transform
 }
 
-func NewRenderer(paper PaperSize, landscape bool, margin float64) *Renderer {
+// DefaultFontDir returns the default font directory.
+// On Linux: /usr/share/fonts/truetype/dejavu
+// On Windows: the directory containing the executable
+func DefaultFontDir() string {
+	if runtime.GOOS == "windows" {
+		exe, err := os.Executable()
+		if err == nil {
+			return filepath.Dir(exe)
+		}
+		return "."
+	}
+	return "/usr/share/fonts/truetype/dejavu"
+}
+
+func NewRenderer(paper PaperSize, landscape bool, margin float64, fontDir string) *Renderer {
 	orient := "P"
 	if landscape {
 		orient = "L"
@@ -26,7 +43,12 @@ func NewRenderer(paper PaperSize, landscape bool, margin float64) *Renderer {
 	pdf.SetAutoPageBreak(false, 0)
 
 	// Add a UTF-8 capable font for proper Unicode text rendering (e.g. Hungarian ő, ű)
-	pdf.SetFontLocation("/usr/share/fonts/truetype/dejavu")
+	// Expected font files: DejaVuSans.ttf, DejaVuSans-Bold.ttf,
+	// DejaVuSans-Oblique.ttf, DejaVuSans-BoldOblique.ttf
+	if fontDir == "" {
+		fontDir = DefaultFontDir()
+	}
+	pdf.SetFontLocation(fontDir)
 	pdf.AddUTF8Font("DejaVu", "", "DejaVuSans.ttf")
 	pdf.AddUTF8Font("DejaVu", "B", "DejaVuSans-Bold.ttf")
 	pdf.AddUTF8Font("DejaVu", "I", "DejaVuSans-Oblique.ttf")

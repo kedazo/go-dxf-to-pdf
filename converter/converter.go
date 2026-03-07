@@ -21,6 +21,7 @@ type Options struct {
 	DebugBBox bool   // draw bounding box rectangle on the PDF
 	Crop      string // explicit bounding box "minX,minY,maxX,maxY" in drawing units (overrides auto-detection)
 	AutoPaper bool   // calculate paper size from drawing dimensions at the given scale
+	FontDir   string // path to directory containing DejaVuSans*.ttf files (empty = default)
 }
 
 type Result struct {
@@ -303,7 +304,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 			Height: drawH + 2*margin,
 		}
 		// Paper is exactly sized — render directly without landscape swap or auto-fit
-		r := NewRenderer(paper, false, margin)
+		r := NewRenderer(paper, false, margin, opts.FontDir)
 		t := NewTransform(bbox, effectiveScale, paper, margin, ParseAlignment(opts.Align), false)
 		r.SetTransform(t)
 		RenderEntities(r, drawing.Entities, layerMap, blockMap, layerFilter)
@@ -341,7 +342,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 				unitFactor/fitScale)
 		}
 		t := NewTransform(bbox, fitScale, paper, margin, align, landscape)
-		r := NewRenderer(paper, landscape, margin)
+		r := NewRenderer(paper, landscape, margin, opts.FontDir)
 		r.SetTransform(t)
 		RenderEntities(r, drawing.Entities, layerMap, blockMap, layerFilter)
 
@@ -368,7 +369,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 
 	grid := ComputeTileGrid(drawW, drawH, printW, printH)
 
-	renderer := NewRenderer(paper, landscape, margin)
+	renderer := NewRenderer(paper, landscape, margin, opts.FontDir)
 	totalPages := grid.Cols * grid.Rows
 
 	for row := 0; row < grid.Rows; row++ {
