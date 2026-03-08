@@ -17,11 +17,14 @@ type Options struct {
 	Align   string   // "center", "bottom-left", "top-left"
 	Layers  []string // nil = all layers
 	Tile    bool
-	Dwg2Dxf   string // explicit path to dwg2dxf binary (empty = auto-detect)
-	DebugBBox bool   // draw bounding box rectangle on the PDF
-	Crop      string // explicit bounding box "minX,minY,maxX,maxY" in drawing units (overrides auto-detection)
-	AutoPaper bool   // calculate paper size from drawing dimensions at the given scale
-	FontDir   string // path to directory containing DejaVuSans*.ttf files (empty = default)
+	Dwg2Dxf     string  // explicit path to dwg2dxf binary (empty = auto-detect)
+	DebugBBox   bool    // draw bounding box rectangle on the output
+	Crop        string  // explicit bounding box "minX,minY,maxX,maxY" in drawing units (overrides auto-detection)
+	AutoPaper   bool    // calculate paper size from drawing dimensions at the given scale
+	FontDir     string  // path to directory containing DejaVuSans*.ttf files (empty = default)
+	Format      string  // output format: "pdf", "png", "jpg" (default: auto from extension)
+	DPI         float64 // raster output DPI (default: 300)
+	Transparent bool    // transparent PNG background (default: false)
 }
 
 type Result struct {
@@ -131,13 +134,13 @@ func loadDrawing(inputPath string, dwg2dxfBin string) (*dxf.Drawing, error) {
 	return &drawing, nil
 }
 
-// Convert converts a DXF or DWG file to PDF.
-func Convert(inputPath, pdfPath string, opts Options) (*Result, error) {
+// Convert converts a DXF or DWG file to PDF, PNG, or JPG.
+func Convert(inputPath, outputPath string, opts Options) (*Result, error) {
 	drawing, err := loadDrawing(inputPath, opts.Dwg2Dxf)
 	if err != nil {
 		return nil, err
 	}
-	return convertDrawing(drawing, pdfPath, opts)
+	return convertDrawing(drawing, outputPath, opts)
 }
 
 // ConvertReader converts a DXF from a reader to a PDF writer.
@@ -311,7 +314,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		if opts.DebugBBox {
 			r.DrawDebugBBox(bbox)
 		}
-		if err := r.Save(pdfPath); err != nil {
+		if err := r.Save(pdfPath, opts.Format, opts.DPI, opts.Transparent); err != nil {
 			return nil, fmt.Errorf("saving PDF: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "Paper size: %.0f x %.0f mm\n", paper.Width, paper.Height)
@@ -350,7 +353,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 			r.DrawDebugBBox(bbox)
 		}
 
-		if err := r.Save(pdfPath); err != nil {
+		if err := r.Save(pdfPath, opts.Format, opts.DPI, opts.Transparent); err != nil {
 			return nil, fmt.Errorf("saving PDF: %w", err)
 		}
 		return &Result{Pages: 1, BoundingBox: bbox, Units: unitName, UnitFactor: unitFactor}, nil
@@ -400,7 +403,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		}
 	}
 
-	if err := renderer.Save(pdfPath); err != nil {
+	if err := renderer.Save(pdfPath, opts.Format, opts.DPI, opts.Transparent); err != nil {
 		return nil, fmt.Errorf("saving PDF: %w", err)
 	}
 

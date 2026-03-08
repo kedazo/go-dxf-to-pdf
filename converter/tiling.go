@@ -30,24 +30,23 @@ func DrawCropMarks(r *Renderer, margin, pageW, pageH float64) {
 	const markLen = 5.0
 	const markWidth = 0.1
 
-	r.pdf.SetDrawColor(0, 0, 0)
-	r.pdf.SetLineWidth(markWidth)
+	r.SetRawStyle(RGB{0, 0, 0}, markWidth)
 
 	// Top-left
-	r.pdf.Line(margin-markLen, margin, margin, margin)
-	r.pdf.Line(margin, margin-markLen, margin, margin)
+	r.DrawRawLine(margin-markLen, margin, margin, margin)
+	r.DrawRawLine(margin, margin-markLen, margin, margin)
 
 	// Top-right
 	right := pageW - margin
-	r.pdf.Line(right, margin-markLen, right, margin)
-	r.pdf.Line(right, margin, right+markLen, margin)
+	r.DrawRawLine(right, margin-markLen, right, margin)
+	r.DrawRawLine(right, margin, right+markLen, margin)
 
 	// Bottom-left
 	bottom := pageH - margin
-	r.pdf.Line(margin-markLen, bottom, margin, bottom)
-	r.pdf.Line(margin, bottom, margin, bottom+markLen)
+	r.DrawRawLine(margin-markLen, bottom, margin, bottom)
+	r.DrawRawLine(margin, bottom, margin, bottom+markLen)
 
 	// Bottom-right
-	r.pdf.Line(right, bottom, right+markLen, bottom)
-	r.pdf.Line(right, bottom, right, bottom+markLen)
+	r.DrawRawLine(right, bottom, right+markLen, bottom)
+	r.DrawRawLine(right, bottom, right, bottom+markLen)
 }

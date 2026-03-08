@@ -641,12 +641,12 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		x3, y3 := ai(e.ThirdCorner.X, e.ThirdCorner.Y)
 		x4, y4 := ai(e.FourthCorner.X, e.FourthCorner.Y)
 		r.SetStyle(rgb, 0)
-		r.pdf.SetFillColor(int(rgb.R), int(rgb.G), int(rgb.B))
+		r.SetFillColor(rgb)
 		r.DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4)
 
 	case *dxf.Hatch:
 		if enableHatch && !e.SolidFill && len(e.PatternLines) > 0 {
-			r.pdf.SetLineWidth(0.05) // thin lines for hatch fill
+			r.SetStyle(rgb, 0.05) // thin lines for hatch fill
 			lines := generateHatchFillLines(e)
 			for _, seg := range lines {
 				x1, y1 := ai(seg[0], seg[1])

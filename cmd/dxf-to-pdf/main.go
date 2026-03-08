@@ -9,22 +9,24 @@ import (
 )
 
 type CLI struct {
-	Input   string   `arg:"" help:"Input DXF or DWG file path."`
-	Output  string   `arg:"" optional:"" help:"Output PDF file path (not needed with --info or --list-layers)."`
-	Scale   string   `optional:"" help:"Scale ratio (e.g. 1:100, 1:50, 1:1). Required for conversion."`
-	Paper   string   `default:"A4" help:"Paper size: A0-A4 or WxH in mm (e.g. 400x300)."`
-	Margin  float64  `default:"10" help:"Margin in mm (uniform on all sides)."`
-	Align   string   `default:"center" enum:"center,bottom-left,top-left" help:"Drawing alignment on page."`
-	Layers  []string `optional:"" help:"Include only these layers (comma-separated)."`
-	Tile    bool     `help:"Tile drawing across multiple pages if it exceeds paper size."`
-	Dwg2Dxf   string `optional:"" help:"Path to dwg2dxf binary (for DWG files). Default: auto-detect from PATH."`
-	DebugBBox bool   `help:"Draw red bounding box rectangle on the PDF for debugging."`
-	Crop      string `optional:"" help:"Crop to bounding box in drawing units: minX,minY,maxX,maxY"`
-	AutoPaper bool   `help:"Auto-size paper to fit drawing at the given scale."`
-	FontDir   string `optional:"" help:"Directory containing DejaVuSans*.ttf font files (default: /usr/share/fonts/truetype/dejavu on Linux, executable dir on Windows)."`
-
-	Info       bool `help:"Print drawing info (units, size, entity count, blocks) and exit."`
-	ListLayers bool `help:"List all layers and exit."`
+	Input       string   `arg:"" help:"Input DXF or DWG file path."`
+	Output      string   `arg:"" optional:"" help:"Output file path (not needed with --info or --list-layers)."`
+	Scale       string   `optional:"" help:"Scale ratio (e.g. 1:100, 1:50, 1:1). Required for conversion."`
+	Paper       string   `default:"A4" help:"Paper size: A0-A4 or WxH in mm (e.g. 400x300)."`
+	Margin      float64  `default:"10" help:"Margin in mm (uniform on all sides)."`
+	Align       string   `default:"center" enum:"center,bottom-left,top-left" help:"Drawing alignment on page."`
+	Layers      []string `optional:"" help:"Include only these layers (comma-separated)."`
+	Tile        bool     `help:"Tile drawing across multiple pages if it exceeds paper size."`
+	Dwg2Dxf     string   `optional:"" help:"Path to dwg2dxf binary (for DWG files). Default: auto-detect from PATH."`
+	DebugBBox   bool     `help:"Draw red bounding box rectangle on the output for debugging."`
+	Crop        string   `optional:"" help:"Crop to bounding box in drawing units: minX,minY,maxX,maxY"`
+	AutoPaper   bool     `help:"Auto-size paper to fit drawing at the given scale."`
+	FontDir     string   `optional:"" help:"Directory containing DejaVuSans*.ttf font files (default: /usr/share/fonts/truetype/dejavu on Linux, executable dir on Windows)."`
+	Format      string   `optional:"" help:"Output format: pdf, png, jpg (default: auto from file extension)."`
+	DPI         float64  `default:"300" help:"DPI for raster output (PNG/JPG). Default: 300."`
+	Transparent bool     `help:"Transparent PNG background (useful for layer compositing)."`
+	Info        bool     `help:"Print drawing info (units, size, entity count, blocks) and exit."`
+	ListLayers  bool     `help:"List all layers and exit."`
 }
 
 func main() {
@@ -97,17 +99,20 @@ func main() {
 	}
 
 	result, err := converter.Convert(cli.Input, cli.Output, converter.Options{
-		Scale:  cli.Scale,
-		Paper:  cli.Paper,
-		Margin: cli.Margin,
-		Align:  cli.Align,
-		Layers: cli.Layers,
-		Tile:    cli.Tile,
-		Dwg2Dxf:   cli.Dwg2Dxf,
-		DebugBBox: cli.DebugBBox,
-		Crop:      cli.Crop,
-		AutoPaper: cli.AutoPaper,
-		FontDir:   cli.FontDir,
+		Scale:       cli.Scale,
+		Paper:       cli.Paper,
+		Margin:      cli.Margin,
+		Align:       cli.Align,
+		Layers:      cli.Layers,
+		Tile:        cli.Tile,
+		Dwg2Dxf:     cli.Dwg2Dxf,
+		DebugBBox:   cli.DebugBBox,
+		Crop:        cli.Crop,
+		AutoPaper:   cli.AutoPaper,
+		FontDir:     cli.FontDir,
+		Format:      cli.Format,
+		DPI:         cli.DPI,
+		Transparent: cli.Transparent,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

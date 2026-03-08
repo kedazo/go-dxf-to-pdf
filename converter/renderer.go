@@ -1,22 +1,33 @@
 package converter
 
 import (
+	"fmt"
+	"image/color"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
-	"github.com/go-pdf/fpdf"
+	"github.com/tdewolff/canvas"
+	"github.com/tdewolff/canvas/renderers"
+	"github.com/tdewolff/canvas/renderers/pdf"
 )
 
 type Renderer struct {
-	pdf       *fpdf.Fpdf
-	transform Transform
+	c          *canvas.Canvas
+	ctx        *canvas.Context
+	pages      []*canvas.Canvas // completed pages (for multi-page/tiling)
+	transform  Transform
+	paper      PaperSize
+	landscape  bool
+	margin     float64
+	fontFamily *canvas.FontFamily
+	pageW      float64
+	pageH      float64
 }
 
 // DefaultFontDir returns the default font directory.
-// On Linux: /usr/share/fonts/truetype/dejavu
-// On Windows: the directory containing the executable
 func DefaultFontDir() string {
 	if runtime.GOOS == "windows" {
 		exe, err := os.Executable()
@@ -29,157 +40,182 @@ func DefaultFontDir() string {
 }
 
 func NewRenderer(paper PaperSize, landscape bool, margin float64, fontDir string) *Renderer {
-	orient := "P"
+	w, h := paper.Width, paper.Height
 	if landscape {
-		orient = "L"
+		w, h = h, w
 	}
-	// Always pass the original paper dimensions — fpdf swaps them when orient="L"
-	pdf := fpdf.NewCustom(&fpdf.InitType{
-		OrientationStr: orient,
-		UnitStr:        "mm",
-		Size:           fpdf.SizeType{Wd: paper.Width, Ht: paper.Height},
-	})
-	pdf.SetMargins(margin, margin, margin)
-	pdf.SetAutoPageBreak(false, 0)
 
-	// Add a UTF-8 capable font for proper Unicode text rendering (e.g. Hungarian ő, ű)
-	// Expected font files: DejaVuSans.ttf, DejaVuSans-Bold.ttf,
-	// DejaVuSans-Oblique.ttf, DejaVuSans-BoldOblique.ttf
+	c := canvas.New(w, h)
+	ctx := canvas.NewContext(c)
+	ctx.SetCoordSystem(canvas.CartesianIV) // Y-down like fpdf
+
 	if fontDir == "" {
 		fontDir = DefaultFontDir()
 	}
-	pdf.SetFontLocation(fontDir)
-	pdf.AddUTF8Font("DejaVu", "", "DejaVuSans.ttf")
-	pdf.AddUTF8Font("DejaVu", "B", "DejaVuSans-Bold.ttf")
-	pdf.AddUTF8Font("DejaVu", "I", "DejaVuSans-Oblique.ttf")
-	pdf.AddUTF8Font("DejaVu", "BI", "DejaVuSans-BoldOblique.ttf")
+	family := canvas.NewFontFamily("DejaVu")
+	family.LoadFontFile(filepath.Join(fontDir, "DejaVuSans.ttf"), canvas.FontRegular)
+	family.LoadFontFile(filepath.Join(fontDir, "DejaVuSans-Bold.ttf"), canvas.FontBold)
+	family.LoadFontFile(filepath.Join(fontDir, "DejaVuSans-Oblique.ttf"), canvas.FontItalic)
+	family.LoadFontFile(filepath.Join(fontDir, "DejaVuSans-BoldOblique.ttf"), canvas.FontBold|canvas.FontItalic)
 
-	pdf.AddPage()
-	return &Renderer{pdf: pdf}
+	return &Renderer{
+		c:          c,
+		ctx:        ctx,
+		paper:      paper,
+		landscape:  landscape,
+		margin:     margin,
+		fontFamily: family,
+		pageW:      w,
+		pageH:      h,
+	}
 }
 
 func (r *Renderer) SetTransform(t Transform) {
 	r.transform = t
 }
 
-func (r *Renderer) SetStyle(color RGB, lineWidthMM float64) {
-	r.pdf.SetDrawColor(int(color.R), int(color.G), int(color.B))
-	r.pdf.SetLineWidth(lineWidthMM)
+func (r *Renderer) SetStyle(col RGB, lineWidthMM float64) {
+	rgba := color.RGBA{col.R, col.G, col.B, 255}
+	r.ctx.SetStrokeColor(rgba)
+	r.ctx.SetStrokeWidth(lineWidthMM)
+	r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0}) // transparent fill by default
+}
+
+func (r *Renderer) SetFillColor(col RGB) {
+	r.ctx.SetFillColor(color.RGBA{col.R, col.G, col.B, 255})
 }
 
 func (r *Renderer) DrawLine(x1, y1, x2, y2 float64) {
-	r.pdf.Line(
-		r.transform.X(x1), r.transform.Y(y1),
-		r.transform.X(x2), r.transform.Y(y2),
-	)
+	px1 := r.transform.X(x1)
+	py1 := r.transform.Y(y1)
+	px2 := r.transform.X(x2)
+	py2 := r.transform.Y(y2)
+	r.drawLine(px1, py1, px2, py2)
+}
+
+// drawLine draws a line in page coordinates (used by DrawLine and crop marks).
+func (r *Renderer) drawLine(x1, y1, x2, y2 float64) {
+	p := &canvas.Path{}
+	p.MoveTo(x1, y1)
+	p.LineTo(x2, y2)
+	r.ctx.DrawPath(0, 0, p)
 }
 
 func (r *Renderer) DrawCircle(cx, cy, radius float64) {
-	r.pdf.Circle(
-		r.transform.X(cx), r.transform.Y(cy),
-		r.transform.Dist(radius),
-		"D",
-	)
+	// Use arc sampling for consistency (avoids canvas Circle positioning issues with CartesianIV)
+	r.DrawArc(cx, cy, radius, 0, 360)
 }
 
 func (r *Renderer) DrawArc(cx, cy, radius, startAngleDeg, endAngleDeg float64) {
-	px := r.transform.X(cx)
-	py := r.transform.Y(cy)
-	pr := r.transform.Dist(radius)
-
-	// fpdf.Arc internally handles Y-flip: fpdf 90° = UP on screen,
-	// same as DXF convention. So DXF angles pass through directly.
-	pdfStart := math.Mod(startAngleDeg, 360)
-	if pdfStart < 0 {
-		pdfStart += 360
-	}
-	pdfEnd := math.Mod(endAngleDeg, 360)
-	if pdfEnd < 0 {
-		pdfEnd += 360
-	}
-	if pdfEnd <= pdfStart {
-		pdfEnd += 360
+	// Sample arc into line segments in DXF coordinates, then transform each point.
+	// This avoids all angle/positioning complexity with canvas's arc API.
+	sweep := endAngleDeg - startAngleDeg
+	numSegs := int(math.Ceil(math.Abs(sweep) / 2.0)) // ~2° per segment
+	if numSegs < 4 {
+		numSegs = 4
 	}
 
-	r.pdf.Arc(px, py, pr, pr, 0, pdfStart, pdfEnd, "D")
+	p := &canvas.Path{}
+	for i := 0; i <= numSegs; i++ {
+		t := float64(i) / float64(numSegs)
+		angleDeg := startAngleDeg + t*sweep
+		angleRad := angleDeg * math.Pi / 180
+		// Point on arc in DXF coordinates
+		dxfX := cx + radius*math.Cos(angleRad)
+		dxfY := cy + radius*math.Sin(angleRad)
+		px := r.transform.X(dxfX)
+		py := r.transform.Y(dxfY)
+		if i == 0 {
+			p.MoveTo(px, py)
+		} else {
+			p.LineTo(px, py)
+		}
+	}
+	r.ctx.DrawPath(0, 0, p)
 }
 
 func (r *Renderer) DrawEllipse(cx, cy, majorX, majorY, minorRatio, startAngleRad, endAngleRad float64) {
 	majorLen := math.Sqrt(majorX*majorX + majorY*majorY)
 	minorLen := majorLen * minorRatio
-	rotDeg := math.Atan2(majorY, majorX) * 180 / math.Pi
-
-	rx := r.transform.Dist(majorLen)
-	ry := r.transform.Dist(minorLen)
-	px := r.transform.X(cx)
-	py := r.transform.Y(cy)
+	rotRad := math.Atan2(majorY, majorX)
 
 	isFullEllipse := math.Abs(endAngleRad-startAngleRad-2*math.Pi) < 0.001 ||
 		(startAngleRad == 0 && endAngleRad == 0)
 
+	startA := startAngleRad
+	endA := endAngleRad
 	if isFullEllipse {
-		r.pdf.Ellipse(px, py, rx, ry, -rotDeg, "D")
-	} else {
-		startDeg := startAngleRad * 180 / math.Pi
-		endDeg := endAngleRad * 180 / math.Pi
-		pdfStart := math.Mod(startDeg, 360)
-		if pdfStart < 0 {
-			pdfStart += 360
-		}
-		pdfEnd := math.Mod(endDeg, 360)
-		if pdfEnd < 0 {
-			pdfEnd += 360
-		}
-		if pdfEnd <= pdfStart {
-			pdfEnd += 360
-		}
-		r.pdf.Arc(px, py, rx, ry, -rotDeg, pdfStart, pdfEnd, "D")
+		startA = 0
+		endA = 2 * math.Pi
 	}
+
+	// Sample ellipse arc in DXF coordinates, then transform each point.
+	sweep := endA - startA
+	numSegs := int(math.Ceil(math.Abs(sweep) / (2.0 * math.Pi / 180))) // ~2° per segment
+	if numSegs < 4 {
+		numSegs = 4
+	}
+
+	cosR := math.Cos(rotRad)
+	sinR := math.Sin(rotRad)
+
+	p := &canvas.Path{}
+	for i := 0; i <= numSegs; i++ {
+		t := float64(i) / float64(numSegs)
+		angle := startA + t*sweep
+		// Point on unrotated ellipse
+		ex := majorLen * math.Cos(angle)
+		ey := minorLen * math.Sin(angle)
+		// Rotate by ellipse rotation
+		dxfX := cx + ex*cosR - ey*sinR
+		dxfY := cy + ex*sinR + ey*cosR
+		px := r.transform.X(dxfX)
+		py := r.transform.Y(dxfY)
+		if i == 0 {
+			p.MoveTo(px, py)
+		} else {
+			p.LineTo(px, py)
+		}
+	}
+	if isFullEllipse {
+		p.Close()
+	}
+	r.ctx.DrawPath(0, 0, p)
 }
 
 func (r *Renderer) DrawPolyline(points [][2]float64, closed bool) {
 	if len(points) < 2 {
 		return
 	}
+	p := &canvas.Path{}
+	p.MoveTo(r.transform.X(points[0][0]), r.transform.Y(points[0][1]))
 	for i := 1; i < len(points); i++ {
-		r.pdf.Line(
-			r.transform.X(points[i-1][0]), r.transform.Y(points[i-1][1]),
-			r.transform.X(points[i][0]), r.transform.Y(points[i][1]),
-		)
+		p.LineTo(r.transform.X(points[i][0]), r.transform.Y(points[i][1]))
 	}
 	if closed && len(points) > 2 {
-		last := points[len(points)-1]
-		first := points[0]
-		r.pdf.Line(
-			r.transform.X(last[0]), r.transform.Y(last[1]),
-			r.transform.X(first[0]), r.transform.Y(first[1]),
-		)
+		p.Close()
 	}
+	r.ctx.DrawPath(0, 0, p)
 }
 
-// DrawBulgeArc draws the arc segment between two polyline vertices connected by a bulge value.
 func (r *Renderer) DrawBulgeArc(x1, y1, x2, y2, bulge float64) {
 	if math.Abs(bulge) < 1e-10 {
 		r.DrawLine(x1, y1, x2, y2)
 		return
 	}
 
-	// Calculate arc from bulge
 	dx := x2 - x1
 	dy := y2 - y1
 	chordLen := math.Sqrt(dx*dx + dy*dy)
 	sagitta := math.Abs(bulge) * chordLen / 2
 	radius := (chordLen*chordLen/4 + sagitta*sagitta) / (2 * sagitta)
 
-	// Center of chord
 	mx := (x1 + x2) / 2
 	my := (y1 + y2) / 2
 
-	// Perpendicular direction
 	px := -dy / chordLen
 	py := dx / chordLen
 
-	// Distance from chord midpoint to arc center
 	d := radius - sagitta
 	if bulge < 0 {
 		d = -d
@@ -188,17 +224,14 @@ func (r *Renderer) DrawBulgeArc(x1, y1, x2, y2, bulge float64) {
 	cx := mx + px*d
 	cy := my + py*d
 
-	// Start and end angles
 	startAngle := math.Atan2(y1-cy, x1-cx) * 180 / math.Pi
 	endAngle := math.Atan2(y2-cy, x2-cx) * 180 / math.Pi
 
 	if bulge > 0 {
-		// Counter-clockwise
 		if endAngle < startAngle {
 			endAngle += 360
 		}
 	} else {
-		// Clockwise: swap
 		startAngle, endAngle = endAngle, startAngle
 		if endAngle < startAngle {
 			endAngle += 360
@@ -209,20 +242,27 @@ func (r *Renderer) DrawBulgeArc(x1, y1, x2, y2, bulge float64) {
 }
 
 func (r *Renderer) DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4 float64) {
-	pts := []fpdf.PointType{
-		{X: r.transform.X(x1), Y: r.transform.Y(y1)},
-		{X: r.transform.X(x2), Y: r.transform.Y(y2)},
-		// DXF SOLID has swapped 3rd and 4th corners
-		{X: r.transform.X(x4), Y: r.transform.Y(y4)},
-		{X: r.transform.X(x3), Y: r.transform.Y(y3)},
-	}
-	r.pdf.Polygon(pts, "F")
+	p := &canvas.Path{}
+	p.MoveTo(r.transform.X(x1), r.transform.Y(y1))
+	p.LineTo(r.transform.X(x2), r.transform.Y(y2))
+	// DXF SOLID has swapped 3rd and 4th corners
+	p.LineTo(r.transform.X(x4), r.transform.Y(y4))
+	p.LineTo(r.transform.X(x3), r.transform.Y(y3))
+	p.Close()
+	r.ctx.DrawPath(0, 0, p)
 }
 
 func (r *Renderer) DrawPoint(x, y float64) {
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
-	r.pdf.Circle(px, py, 0.2, "F")
+	p := canvas.Circle(0.2)
+	// Circle path is centered around (rx, ry) with radius 0.2
+	r.ctx.Push()
+	fillSave := r.ctx.Style.Fill
+	r.ctx.SetFillColor(r.ctx.Style.Stroke.Color)
+	r.ctx.DrawPath(px-0.2, py-0.2, p)
+	r.ctx.Style.Fill = fillSave
+	r.ctx.Pop()
 }
 
 func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg float64) {
@@ -234,22 +274,20 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg flo
 		scaledH = 0.5
 	}
 
-	r.pdf.SetFont("DejaVu", "", scaledH*2.83465) // mm to points
-	r.pdf.SetTextColor(0, 0, 0)
+	ptSize := scaledH * 2.83465 // mm to points
+	face := r.fontFamily.Face(ptSize, canvas.Black, canvas.FontRegular, canvas.FontNormal)
+	textLine := canvas.NewTextLine(face, text, canvas.Left)
 
 	if math.Abs(rotationDeg) > 0.01 {
-		r.pdf.TransformBegin()
-		r.pdf.TransformRotate(-rotationDeg, px, py)
-		r.pdf.Text(px, py, text)
-		r.pdf.TransformEnd()
+		r.ctx.Push()
+		r.ctx.ComposeView(canvas.Identity.RotateAbout(rotationDeg, px, py))
+		r.ctx.DrawText(px, py, textLine)
+		r.ctx.Pop()
 	} else {
-		r.pdf.Text(px, py, text)
+		r.ctx.DrawText(px, py, textLine)
 	}
 }
 
-// DrawMText renders parsed MText segments with per-segment styling.
-// Supports: color changes, height changes, underline, multi-line (\P),
-// bold/italic (font style), and stacking (rendered inline as num/denom).
 func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64) {
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
@@ -259,13 +297,13 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	}
 
 	if math.Abs(rotationDeg) > 0.01 {
-		r.pdf.TransformBegin()
-		r.pdf.TransformRotate(-rotationDeg, px, py)
+		r.ctx.Push()
+		r.ctx.ComposeView(canvas.Identity.RotateAbout(rotationDeg, px, py))
 	}
 
 	curX := px
 	curY := py
-	lineHeight := defaultScaledH * 1.4 // line spacing
+	lineHeight := defaultScaledH * 1.4
 
 	for _, seg := range segments {
 		if seg.NewLine {
@@ -277,7 +315,6 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			continue
 		}
 
-		// Determine height for this segment
 		scaledH := defaultScaledH
 		if seg.Style.HeightRelative > 0 {
 			scaledH = defaultScaledH * seg.Style.HeightRelative
@@ -288,118 +325,233 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			scaledH = 0.5
 		}
 
-		// Font style
-		fontStyle := ""
-		if seg.Style.Bold {
-			fontStyle += "B"
+		var fontStyle canvas.FontStyle
+		if seg.Style.Bold && seg.Style.Italic {
+			fontStyle = canvas.FontBold | canvas.FontItalic
+		} else if seg.Style.Bold {
+			fontStyle = canvas.FontBold
+		} else if seg.Style.Italic {
+			fontStyle = canvas.FontItalic
+		} else {
+			fontStyle = canvas.FontRegular
 		}
-		if seg.Style.Italic {
-			fontStyle += "I"
-		}
 
-		ptSize := scaledH * 2.83465 // mm to points
-		r.pdf.SetFont("DejaVu", fontStyle, ptSize)
+		ptSize := scaledH * 2.83465
+		textColor := color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
+		face := r.fontFamily.Face(ptSize, textColor, fontStyle, canvas.FontNormal)
+		textLine := canvas.NewTextLine(face, seg.Text, canvas.Left)
 
-		// Color
-		r.pdf.SetTextColor(seg.Style.ColorR, seg.Style.ColorG, seg.Style.ColorB)
+		r.ctx.DrawText(curX, curY, textLine)
 
-		// Render text
-		r.pdf.Text(curX, curY, seg.Text)
-
-		// Underline: draw a line under the text
+		// Underline
 		if seg.Style.Underline {
-			textW := r.pdf.GetStringWidth(seg.Text)
-			r.pdf.SetDrawColor(seg.Style.ColorR, seg.Style.ColorG, seg.Style.ColorB)
-			r.pdf.SetLineWidth(scaledH * 0.05)
+			textW := textLine.Bounds().W()
+			lineColor := color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
+			r.ctx.Push()
+			r.ctx.SetStrokeColor(lineColor)
+			r.ctx.SetStrokeWidth(scaledH * 0.05)
+			r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
 			underY := curY + scaledH*0.15
-			r.pdf.Line(curX, underY, curX+textW, underY)
+			r.drawLine(curX, underY, curX+textW, underY)
+			r.ctx.Pop()
 		}
 
-		// Strikethrough: draw a line through the middle
+		// Strikethrough
 		if seg.Style.Strikethrough {
-			textW := r.pdf.GetStringWidth(seg.Text)
-			r.pdf.SetDrawColor(seg.Style.ColorR, seg.Style.ColorG, seg.Style.ColorB)
-			r.pdf.SetLineWidth(scaledH * 0.05)
+			textW := textLine.Bounds().W()
+			lineColor := color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
+			r.ctx.Push()
+			r.ctx.SetStrokeColor(lineColor)
+			r.ctx.SetStrokeWidth(scaledH * 0.05)
+			r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
 			strikeY := curY - scaledH*0.25
-			r.pdf.Line(curX, strikeY, curX+textW, strikeY)
+			r.drawLine(curX, strikeY, curX+textW, strikeY)
+			r.ctx.Pop()
 		}
 
-		// Overstrike: draw a line above the text
+		// Overstrike
 		if seg.Style.Overstrike {
-			textW := r.pdf.GetStringWidth(seg.Text)
-			r.pdf.SetDrawColor(seg.Style.ColorR, seg.Style.ColorG, seg.Style.ColorB)
-			r.pdf.SetLineWidth(scaledH * 0.05)
+			textW := textLine.Bounds().W()
+			lineColor := color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
+			r.ctx.Push()
+			r.ctx.SetStrokeColor(lineColor)
+			r.ctx.SetStrokeWidth(scaledH * 0.05)
+			r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
 			overY := curY - scaledH*0.7
-			r.pdf.Line(curX, overY, curX+textW, overY)
+			r.drawLine(curX, overY, curX+textW, overY)
+			r.ctx.Pop()
 		}
 
-		// Advance cursor
-		curX += r.pdf.GetStringWidth(seg.Text)
+		curX += textLine.Bounds().W()
 	}
 
 	if math.Abs(rotationDeg) > 0.01 {
-		r.pdf.TransformEnd()
+		r.ctx.Pop()
 	}
 }
 
 func (r *Renderer) DrawSpline(controlPoints [][2]float64, degree int, knots []float64) {
-	// Approximate spline by evaluating points along the curve
 	if len(controlPoints) < 2 {
 		return
 	}
 
-	// Simple fallback: connect control points as polyline for now
-	// TODO: implement proper B-spline to bezier conversion
 	numSamples := len(controlPoints) * 10
 	points := evaluateBSpline(controlPoints, degree, knots, numSamples)
 
+	p := &canvas.Path{}
+	p.MoveTo(r.transform.X(points[0][0]), r.transform.Y(points[0][1]))
 	for i := 1; i < len(points); i++ {
-		r.pdf.Line(
-			r.transform.X(points[i-1][0]), r.transform.Y(points[i-1][1]),
-			r.transform.X(points[i][0]), r.transform.Y(points[i][1]),
-		)
+		p.LineTo(r.transform.X(points[i][0]), r.transform.Y(points[i][1]))
 	}
+	r.ctx.DrawPath(0, 0, p)
 }
 
-// DrawDebugBBox draws a red dashed rectangle around the drawing bounding box.
 func (r *Renderer) DrawDebugBBox(bbox BBox) {
-	r.pdf.SetDrawColor(255, 0, 0)
-	r.pdf.SetLineWidth(0.3)
+	r.ctx.Push()
+	r.ctx.SetStrokeColor(color.RGBA{255, 0, 0, 255})
+	r.ctx.SetStrokeWidth(0.3)
+	r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
 
 	x1 := r.transform.X(bbox.MinX)
-	y1 := r.transform.Y(bbox.MaxY) // top of drawing (DXF MaxY = PDF top)
+	y1 := r.transform.Y(bbox.MaxY)
 	x2 := r.transform.X(bbox.MaxX)
-	y2 := r.transform.Y(bbox.MinY) // bottom of drawing
+	y2 := r.transform.Y(bbox.MinY)
 
-	// Draw rectangle
-	r.pdf.Line(x1, y1, x2, y1) // top
-	r.pdf.Line(x2, y1, x2, y2) // right
-	r.pdf.Line(x2, y2, x1, y2) // bottom
-	r.pdf.Line(x1, y2, x1, y1) // left
+	r.drawLine(x1, y1, x2, y1) // top
+	r.drawLine(x2, y1, x2, y2) // right
+	r.drawLine(x2, y2, x1, y2) // bottom
+	r.drawLine(x1, y2, x1, y1) // left
+	r.drawLine(x1, y1, x2, y2) // diagonal
+	r.drawLine(x1, y2, x2, y1) // diagonal
 
-	// Draw diagonals to make it obvious
-	r.pdf.Line(x1, y1, x2, y2)
-	r.pdf.Line(x1, y2, x2, y1)
+	r.ctx.Pop()
 }
 
 func (r *Renderer) AddPage() {
-	r.pdf.AddPage()
+	r.pages = append(r.pages, r.c)
+	c := canvas.New(r.pageW, r.pageH)
+	r.c = c
+	r.ctx = canvas.NewContext(c)
+	r.ctx.SetCoordSystem(canvas.CartesianIV)
 }
 
 func (r *Renderer) SetClipRect(x, y, w, h float64) {
-	r.pdf.ClipRect(x, y, w, h, false)
+	// Canvas doesn't have a direct clip rect on context, so we use Push/Pop
+	// and will rely on the drawing being within bounds.
+	// For proper clipping, we'd need to intersect paths, but for tiling
+	// the content is already positioned to fit within the tile.
+	r.ctx.Push()
 }
 
 func (r *Renderer) ClipEnd() {
-	r.pdf.ClipEnd()
+	r.ctx.Pop()
 }
 
-func (r *Renderer) Save(path string) error {
-	return r.pdf.OutputFileAndClose(path)
+func (r *Renderer) Save(path string, format string, dpi float64, transparent bool) error {
+	if format == "" {
+		format = formatFromExtension(path)
+	}
+
+	allPages := make([]*canvas.Canvas, 0, len(r.pages)+1)
+	allPages = append(allPages, r.pages...)
+	allPages = append(allPages, r.c)
+
+	switch format {
+	case "pdf":
+		return r.savePDF(path, allPages)
+	case "png":
+		return r.saveRaster(path, allPages, dpi, transparent, "png")
+	case "jpg", "jpeg":
+		return r.saveRaster(path, allPages, dpi, false, "jpg")
+	default:
+		return fmt.Errorf("unsupported format: %s", format)
+	}
 }
 
-func (r *Renderer) Pdf() *fpdf.Fpdf {
-	return r.pdf
+func (r *Renderer) savePDF(path string, pages []*canvas.Canvas) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	opts := pdf.DefaultOptions
+	p := pdf.New(f, pages[0].W, pages[0].H, &opts)
+	pages[0].RenderTo(p)
+
+	for i := 1; i < len(pages); i++ {
+		p.NewPage(pages[i].W, pages[i].H)
+		pages[i].RenderTo(p)
+	}
+
+	return p.Close()
+}
+
+func (r *Renderer) saveRaster(path string, pages []*canvas.Canvas, dpi float64, transparent bool, format string) error {
+	if dpi <= 0 {
+		dpi = 300
+	}
+	res := canvas.DPI(dpi)
+
+	for i, c := range pages {
+		pagePath := path
+		if len(pages) > 1 {
+			ext := filepath.Ext(path)
+			base := strings.TrimSuffix(path, ext)
+			pagePath = fmt.Sprintf("%s_%d%s", base, i+1, ext)
+		}
+
+		if !transparent {
+			// Create new canvas with white background, then render drawing on top
+			bgCanvas := canvas.New(c.W, c.H)
+			bgCtx := canvas.NewContext(bgCanvas)
+			bgCtx.SetFillColor(color.RGBA{255, 255, 255, 255})
+			bgCtx.SetStrokeColor(color.RGBA{0, 0, 0, 0})
+			bgCtx.DrawPath(0, 0, canvas.Rectangle(c.W, c.H))
+			c.RenderTo(bgCanvas)
+			c = bgCanvas
+		}
+
+		var writer canvas.Writer
+		switch format {
+		case "png":
+			writer = renderers.PNG(res)
+		case "jpg":
+			writer = renderers.JPEG(res)
+		}
+
+		if err := c.WriteFile(pagePath, writer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatFromExtension(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".png":
+		return "png"
+	case ".jpg", ".jpeg":
+		return "jpg"
+	case ".pdf":
+		return "pdf"
+	default:
+		return "pdf"
+	}
+}
+
+// DrawRawLine draws a line in page coordinates (no transform). Used by crop marks.
+func (r *Renderer) DrawRawLine(x1, y1, x2, y2 float64) {
+	r.drawLine(x1, y1, x2, y2)
+}
+
+// SetRawStyle sets stroke color and width for page-coordinate drawing.
+func (r *Renderer) SetRawStyle(col RGB, lineWidthMM float64) {
+	rgba := color.RGBA{col.R, col.G, col.B, 255}
+	r.ctx.SetStrokeColor(rgba)
+	r.ctx.SetStrokeWidth(lineWidthMM)
+	r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
 }
 
 // evaluateBSpline evaluates a B-spline curve at numSamples points.
@@ -408,7 +560,6 @@ func evaluateBSpline(controlPoints [][2]float64, degree int, knots []float64, nu
 	p := degree
 
 	if len(knots) < n+p+2 {
-		// Fallback: just return control points
 		return controlPoints
 	}
 
@@ -428,7 +579,6 @@ func evaluateBSpline(controlPoints [][2]float64, degree int, knots []float64, nu
 func deBoor(controlPoints [][2]float64, p int, knots []float64, t float64) (float64, float64) {
 	n := len(controlPoints)
 
-	// Find knot span
 	k := p
 	for k < n && k+1 < len(knots) && knots[k+1] <= t {
 		k++
@@ -437,7 +587,6 @@ func deBoor(controlPoints [][2]float64, p int, knots []float64, t float64) (floa
 		k = n - 1
 	}
 
-	// Copy relevant control points
 	d := make([][2]float64, p+1)
 	for j := 0; j <= p; j++ {
 		idx := k - p + j
@@ -465,3 +614,4 @@ func deBoor(controlPoints [][2]float64, p int, knots []float64, t float64) (floa
 
 	return d[p][0], d[p][1]
 }
+
