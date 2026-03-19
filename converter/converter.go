@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"unicode/utf8"
 
 	dxf "github.com/ixmilia/dxf-go"
 	"golang.org/x/text/encoding/charmap"
@@ -176,6 +177,13 @@ func readDxfFile(path string) (dxf.Drawing, error) {
 // detectDxfEncoding checks the raw DXF bytes for encoding hints.
 // Returns nil if the file appears to be UTF-8 or ASCII.
 func detectDxfEncoding(data []byte) *charmap.Charmap {
+	// If the file is already valid UTF-8 with non-ASCII content, skip conversion.
+	// Some DXF exporters (e.g. dwg2dxf from LibreDWG) write UTF-8 but declare
+	// $DWGCODEPAGE as ANSI_1250 — converting would double-encode.
+	if utf8.Valid(data) && !isASCIIOnly(data) {
+		return nil
+	}
+
 	// Check for $DWGCODEPAGE header
 	s := string(data)
 	if idx := bytes.Index(data, []byte("$DWGCODEPAGE")); idx >= 0 {
@@ -216,6 +224,16 @@ func detectDxfEncoding(data []byte) *charmap.Charmap {
 	}
 
 	return nil
+}
+
+// isASCIIOnly returns true if data contains only bytes < 0x80.
+func isASCIIOnly(data []byte) bool {
+	for _, b := range data {
+		if b >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // extractCodepage extracts the codepage value from text starting at $DWGCODEPAGE.
