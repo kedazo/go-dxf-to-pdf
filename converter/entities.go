@@ -537,6 +537,17 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 					wx, wy, newScaleX, newScaleY, newRot)
 			}
 		}
+
+	default:
+		// DIMENSION entities reference an anonymous block containing their geometry.
+		if dim, ok := ent.(dxf.Dimension); ok {
+			if blk, ok := blocks[dim.BlockName()]; ok {
+				for _, be := range blk.Entities {
+					expandBBoxForEntity(bb, be, blocks, depth+1,
+						0, 0, 0, 0, 1, 1, 0)
+				}
+			}
+		}
 	}
 }
 
@@ -666,6 +677,20 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 				renderEntity(r, be, layers, blocks, layerFilter, depth+1,
 					blk.BasePoint.X, blk.BasePoint.Y,
 					wx, wy, newScaleX, newScaleY, newRot)
+			}
+		}
+
+	default:
+		// DIMENSION entities reference an anonymous block containing their geometry.
+		// The block entities are in world coordinates (basePoint=0,0) and may be on
+		// sublayers (e.g. "Layer_Pen_No__1"), so we bypass the layer filter here —
+		// the dimension entity itself already passed the filter above.
+		if dim, ok := ent.(dxf.Dimension); ok {
+			if blk, ok := blocks[dim.BlockName()]; ok {
+				for _, be := range blk.Entities {
+					renderEntity(r, be, layers, blocks, nil, depth+1,
+						0, 0, 0, 0, 1, 1, 0)
+				}
 			}
 		}
 	}
