@@ -51,7 +51,15 @@ func IsDWG(path string) bool {
 
 // ConvertDWGtoDXF converts a DWG file to a temporary DXF file using dwg2dxf.
 // Returns the path to the temporary DXF file. Caller is responsible for cleanup.
-func ConvertDWGtoDXF(dwgPath, dwg2dxfPath string) (string, error) {
+//
+// When minimal is true, dwg2dxf is invoked with -m (minimal header: only
+// $ACADVER, HANDSEED and ENTITIES). This is used as a fallback for DWGs whose
+// full HEADER section is degraded (e.g. AutoCAD 2018/AC1032 files where
+// LibreDWG reports "Template section not found") and would otherwise be
+// rejected by the strict DXF header parser. Note that -m drops $DWGCODEPAGE
+// and $INSUNITS, so text-encoding and unit auto-detection are less reliable on
+// the fallback output.
+func ConvertDWGtoDXF(dwgPath, dwg2dxfPath string, minimal bool) (string, error) {
 	tmpFile, err := os.CreateTemp("", "dxf-to-pdf-*.dxf")
 	if err != nil {
 		return "", fmt.Errorf("creating temp file: %w", err)
@@ -60,7 +68,12 @@ func ConvertDWGtoDXF(dwgPath, dwg2dxfPath string) (string, error) {
 	tmpFile.Close()
 	os.Remove(dxfPath) // remove so dwg2dxf creates it fresh
 
-	cmd := exec.Command(dwg2dxfPath, "-y", "-o", dxfPath, dwgPath)
+	args := make([]string, 0, 5)
+	if minimal {
+		args = append(args, "-m")
+	}
+	args = append(args, "-y", "-o", dxfPath, dwgPath)
+	cmd := exec.Command(dwg2dxfPath, args...)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		os.Remove(dxfPath)

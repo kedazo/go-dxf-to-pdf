@@ -113,26 +113,45 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 
 // loadDrawing handles DWG conversion and DXF parsing.
 func loadDrawing(inputPath string, dwg2dxfBin string) (*dxf.Drawing, error) {
-	dxfPath := inputPath
-
-	if IsDWG(inputPath) {
-		bin, err := FindDwg2Dxf(dwg2dxfBin)
+	if !IsDWG(inputPath) {
+		drawing, err := readDxfFile(inputPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading DXF: %w", err)
 		}
-		tmpDxf, err := ConvertDWGtoDXF(inputPath, bin)
-		if err != nil {
-			return nil, err
-		}
-		defer os.Remove(tmpDxf)
-		dxfPath = tmpDxf
+		return &drawing, nil
 	}
 
-	drawing, err := readDxfFile(dxfPath)
+	bin, err := FindDwg2Dxf(dwg2dxfBin)
 	if err != nil {
-		return nil, fmt.Errorf("reading DXF: %w", err)
+		return nil, err
 	}
-	return &drawing, nil
+
+	// First attempt: full conversion. This preserves $DWGCODEPAGE and
+	// $INSUNITS, which we need for text-encoding and unit auto-detection.
+	tmpDxf, err := ConvertDWGtoDXF(inputPath, bin, false)
+	if err != nil {
+		return nil, err
+	}
+	drawing, err := readDxfFile(tmpDxf)
+	os.Remove(tmpDxf)
+	if err == nil {
+		return &drawing, nil
+	}
+
+	// Fallback: some DWGs (e.g. AutoCAD 2018/AC1032 from LibreDWG) emit a
+	// degraded HEADER section that the strict DXF parser rejects. Retry with a
+	// minimal header, which omits the broken variables.
+	fmt.Fprintf(os.Stderr, "warning: full DXF parse failed (%v); retrying with minimal header (dwg2dxf -m)\n", err)
+	tmpMin, minErr := ConvertDWGtoDXF(inputPath, bin, true)
+	if minErr != nil {
+		return nil, fmt.Errorf("reading DXF: %w (minimal-header retry failed: %v)", err, minErr)
+	}
+	defer os.Remove(tmpMin)
+	minDrawing, minErr := readDxfFile(tmpMin)
+	if minErr != nil {
+		return nil, fmt.Errorf("reading DXF: %w (minimal-header retry: %v)", err, minErr)
+	}
+	return &minDrawing, nil
 }
 
 // Convert converts a DXF or DWG file to PDF, PNG, or JPG.

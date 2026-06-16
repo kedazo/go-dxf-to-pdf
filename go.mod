@@ -2,7 +2,9 @@ module github.com/kedazo/go-dxf-to-pdf
 
 go 1.25.0
 
-replace github.com/ixmilia/dxf-go => github.com/kedazo/dxf-go v0.2.1
+// Fork of ixmilia/dxf-go with tolerant HEADER parsing (skips malformed header
+// variables instead of aborting them) plus the existing HATCH/charset patches.
+replace github.com/ixmilia/dxf-go => github.com/kedazo/dxf-go v0.2.2
 
 require (
 	github.com/alecthomas/kong v1.14.0

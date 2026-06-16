@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/alecthomas/kong"
 	"github.com/kedazo/go-dxf-to-pdf/converter"
@@ -27,6 +28,21 @@ type CLI struct {
 	Transparent bool     `help:"Transparent PNG background (useful for layer compositing)."`
 	Info        bool     `help:"Print drawing info (units, size, entity count, blocks) and exit."`
 	ListLayers  bool     `help:"List all layers and exit."`
+
+	EmitWallSegments  string  `optional:"" help:"Emit raw segments + detected walls to an XML file and exit."`
+	WallMinThickness  float64 `default:"0.03" help:"Min wall thickness in meters (wall-pair lower bound)."`
+	WallMaxThickness  float64 `default:"0.60" help:"Max wall thickness in meters (wall-pair upper bound)."`
+	WallMinLength     float64 `default:"0.30" help:"Min candidate face length in meters (drops furniture ticks)."`
+	WallAngleTol      float64 `default:"5" help:"Parallel-pair angle tolerance in degrees."`
+	WallMergeGap      float64 `default:"0.05" help:"Collinear midline merge tolerance in meters."`
+	WallBridgeGap     float64 `default:"1.20" help:"Max door/window gap to bridge when merging walls (meters)."`
+	WallIncludeCurves bool    `help:"Include sampled ARC/CIRCLE chords in raw segments (never paired)."`
+
+	SourceUnit         string   `optional:"" help:"Override source unit for wall emit: mm|cm|m|in|ft."`
+	UnitScale          float64  `optional:"" help:"Override DXF-unit->meters factor for wall emit (wins over --source-unit)."`
+	NoDefaultBlacklist bool     `help:"Disable the built-in junk-layer blacklist for wall detection."`
+	ExcludeLayers      []string `optional:"" help:"Extra layer-name substrings to exclude from wall detection (comma-separated)."`
+	WallLayers         []string `optional:"" help:"Only detect walls on layers matching these substrings (positive filter)."`
 }
 
 func main() {
@@ -84,6 +100,53 @@ func main() {
 			for _, b := range info.Blocks {
 				fmt.Printf("  %s\n", b)
 			}
+		}
+		return
+	}
+
+	// Emit wall segments mode — parse, write XML, exit (no rendering).
+	if cli.EmitWallSegments != "" {
+		scale := 0.01
+		if cli.Scale != "" {
+			if s, err := converter.ParseScale(cli.Scale); err == nil {
+				scale = s
+			}
+		}
+		res, err := converter.EmitWallSegments(cli.Input, cli.EmitWallSegments, converter.WallSegmentsOptions{
+			Dwg2Dxf:            cli.Dwg2Dxf,
+			Layers:             cli.Layers,
+			MinThickness:       cli.WallMinThickness,
+			MaxThickness:       cli.WallMaxThickness,
+			MinWallLength:      cli.WallMinLength,
+			AngleTolDeg:        cli.WallAngleTol,
+			MergeGap:           cli.WallMergeGap,
+			BridgeGap:          cli.WallBridgeGap,
+			IncludeCurves:      cli.WallIncludeCurves,
+			Scale:              scale,
+			DPI:                cli.DPI,
+			SourceUnit:         cli.SourceUnit,
+			UnitScale:          cli.UnitScale,
+			NoDefaultBlacklist: cli.NoDefaultBlacklist,
+			ExcludeLayers:      cli.ExcludeLayers,
+			WallLayers:         cli.WallLayers,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Wrote wall segments to %s\n", cli.EmitWallSegments)
+		fmt.Printf("  scene:    %.2f x %.2f m  (units: %s)\n",
+			res.SceneWidthMeters, res.SceneHeightMeters, res.Units)
+		fmt.Printf("  segments: %d   walls: %d\n", res.SegmentCount, res.WallCount)
+		if len(res.ThicknessClusters) > 0 {
+			parts := make([]string, 0, len(res.ThicknessClusters))
+			for _, b := range res.ThicknessClusters {
+				parts = append(parts, fmt.Sprintf("%.2fm×%d", b.Thickness, b.Count))
+			}
+			fmt.Printf("  thickness clusters: %s\n", strings.Join(parts, ", "))
+		}
+		if res.UnitWarning != "" {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", res.UnitWarning)
 		}
 		return
 	}
