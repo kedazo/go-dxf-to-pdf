@@ -90,6 +90,8 @@ var defaultWallBlacklist = []string{
 	"terep", "terrain", "zöldfelület", "lawn", "shrub", "parkoló", "parking",
 	// floor / ceiling / roof finishes
 	"clng", "ceiling", "flor", "a-flor", "floor", "padló", "roof", "tető", "hral",
+	// textures / hatching / fills (rendered as many short parallel lines, never walls)
+	"tx-", "tx_", "hatch", "poché", "poche",
 }
 
 // wallKeepList holds lowercase substrings that mark a layer as wall/structural;
