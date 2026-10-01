@@ -200,6 +200,34 @@ func TestEmitWallSegmentsUnitOverride(t *testing.T) {
 	}
 }
 
+// Block content on layer "0" is on the INSERT's layer, so the blacklist sees
+// the furniture layer, not "0".
+func TestEmitWallSegmentsBlockLayerZero(t *testing.T) {
+	d := dxf.NewDrawing()
+	d.Header.DefaultDrawingUnits = dxf.UnitsMillimeters
+	blk := dxf.NewBlock()
+	blk.Name = "TABLE"
+	for _, y := range []float64{0, 300} {
+		l := dxf.NewLine()
+		l.SetLayer("0")
+		l.P1, l.P2 = dxf.Point{Y: y}, dxf.Point{X: 4000, Y: y}
+		blk.Entities = append(blk.Entities, l)
+	}
+	d.Blocks = append(d.Blocks, *blk)
+	ins := dxf.NewInsert()
+	ins.Name = "TABLE"
+	ins.SetLayer("Beltér - berendezés")
+	d.Entities = append(d.Entities, ins)
+
+	doc, _ := emitAndParse(t, d, WallSegmentsOptions{})
+	if len(doc.Segments) != 2 || doc.Segments[0].Layer != "Beltér - berendezés" {
+		t.Fatalf("segments = %+v, want 2 on the INSERT's layer", doc.Segments)
+	}
+	if len(doc.Walls) != 0 {
+		t.Errorf("walls = %+v, want none (furniture layer is blacklisted)", doc.Walls)
+	}
+}
+
 func TestEmitWallSegmentsBlacklist(t *testing.T) {
 	build := func() *dxf.Drawing {
 		d := dxf.NewDrawing()

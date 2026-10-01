@@ -438,7 +438,8 @@ func collectSegments(out *[]rawSeg, ent dxf.Entity, layers map[string]dxf.Layer,
 	}
 
 	_, lwMM := resolveStyle(ent, layers, ctx)
-	layerName := ent.Layer()
+	// Block content on layer "0" is on the INSERT's layer, as when drawn.
+	layerName := ctx.effectiveLayer(ent)
 
 	m := ctx.m
 	ai := m.apply
