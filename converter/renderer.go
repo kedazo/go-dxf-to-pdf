@@ -934,11 +934,18 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		if seg.Style.HasColor {
 			textColor = color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
 		}
-		width := seg.Style.WidthFactor
+		// Without \W and \Q the text style's width factor and slant apply.
+		width, oblique := seg.Style.WidthFactor, seg.Style.ObliqueAngle
+		if width <= 0 || width == 1 {
+			width = style.width
+		}
 		if width <= 0 {
 			width = 1
 		}
-		look := r.lookWithFont(segFont, segFamily, width, seg.Style.ObliqueAngle)
+		if oblique == 0 {
+			oblique = style.oblique
+		}
+		look := r.lookWithFont(segFont, segFamily, width, oblique)
 
 		// A stacked fraction: numerator and denominator, smaller.
 		if seg.Style.Stacked {

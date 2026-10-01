@@ -272,6 +272,30 @@ func TestMTextWrapAndTabs(t *testing.T) {
 	}
 }
 
+// MTEXT takes its text style's width factor and slant where it sets none.
+func TestMTextStyleWidthAndSlant(t *testing.T) {
+	if _, err := os.Stat(filepath.Join(DefaultFontDir(), "DejaVuSans.ttf")); err != nil {
+		t.Skip("DejaVu fonts not available")
+	}
+	paper := PaperSize{Width: 200, Height: 200}
+	width := func(text string, st textStyle) float64 {
+		r := NewRenderer(paper, false, 0, "")
+		r.SetTransform(NewTransform(BBox{MaxX: 200, MaxY: 200}, 1, paper, 0, AlignTopLeft, false))
+		r.DrawMText(10, 150, ParseMText(text), 5, 0, 1, 1, 0, st)
+		return r.c.Bounds().W()
+	}
+	plain := width("ABCDEF", textStyle{width: 1})
+	if w := width("ABCDEF", textStyle{width: 0.5}); math.Abs(w-plain/2) > plain*0.05 {
+		t.Errorf("style width 0.5: %v mm, want about %v", w, plain/2)
+	}
+	if w := width(`\W2;ABCDEF`, textStyle{width: 0.5}); math.Abs(w-plain*2) > plain*0.05 {
+		t.Errorf("\\W2 in a 0.5 style: %v mm, want about %v", w, plain*2)
+	}
+	if w := width("ABCDEF", textStyle{width: 1, oblique: 15}); w <= plain {
+		t.Errorf("slanted text is %v mm wide, want wider than %v", w, plain)
+	}
+}
+
 // Paragraph codes: explicit tab stops (in text heights), centring in the box,
 // and the stack separator.
 func TestMTextParagraphs(t *testing.T) {
