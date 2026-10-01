@@ -46,7 +46,13 @@ type Renderer struct {
 	dashOffset   float64
 	breakPath    bool // the next segment starts a new subpath (new dash pattern)
 
-	lineTypes *lineTypes // the drawing's LTYPE table (nil = all solid)
+	lineTypes    *lineTypes    // the drawing's LTYPE table (nil = all solid)
+	leaderArrows *leaderArrows // leader arrowheads by dimension style (nil = none)
+}
+
+// SetLeaderArrows sets how leader arrowheads are drawn.
+func (r *Renderer) SetLeaderArrows(la *leaderArrows) {
+	r.leaderArrows = la
 }
 
 // maxPendingSegs bounds the size of one batched path.

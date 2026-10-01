@@ -288,6 +288,14 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		expandMText(bb, m, e)
 	case *dxf.ModelPoint:
 		expand(m, e.Location.X, e.Location.Y)
+	case *dxf.Leader:
+		for _, v := range e.Vertices {
+			expand(m, v.X, v.Y)
+		}
+	case *dxf.Wipeout:
+		for _, p := range wipeoutPolygon(e) {
+			expand(m, p[0], p[1])
+		}
 	case *dxf.Solid:
 		om := m.mul(ocsAffine(e.ExtrusionDirection, e.FirstCorner.Z))
 		for _, p := range []dxf.Point{e.FirstCorner, e.SecondCorner, e.ThirdCorner, e.FourthCorner} {
@@ -438,6 +446,17 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 
 	case *dxf.ModelPoint:
 		r.DrawPoint(m.apply(e.Location.X, e.Location.Y))
+
+	case *dxf.Leader:
+		renderLeader(r, e, layers, blocks, ctx, rgb)
+
+	case *dxf.Wipeout:
+		// Masks what was drawn before it with the paper color.
+		poly := wipeoutPolygon(e)
+		for i, p := range poly {
+			poly[i][0], poly[i][1] = m.apply(p[0], p[1])
+		}
+		r.FillPolygons([][][2]float64{poly}, RGB{255, 255, 255})
 
 	case *dxf.Solid:
 		om := m.mul(ocsAffine(e.ExtrusionDirection, e.FirstCorner.Z))

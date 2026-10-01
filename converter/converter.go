@@ -350,11 +350,13 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 	// Layer selection; the page frame follows it.
 	sel := newLayerFilter(opts.Layers)
 	lineTypes := newLineTypes(drawing)
+	leaderArrows := newLeaderArrows(drawing)
 	newRenderer := func(paper PaperSize, landscape bool) *Renderer {
 		r := NewRenderer(paper, landscape, margin, opts.FontDir)
 		r.SetBatching(isPDF)
 		r.SetLineTypes(lineTypes)
 		r.SetTextStyles(drawing.Styles)
+		r.SetLeaderArrows(leaderArrows)
 		return r
 	}
 
