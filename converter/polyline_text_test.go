@@ -113,8 +113,11 @@ func TestPlainText(t *testing.T) {
 		"%%176":               "°",
 	}
 	for in, want := range tests {
-		if got := plainText(in); got != want {
-			t.Errorf("plainText(%q) = %q, want %q", in, got, want)
+		// TEXT and single-line ATTRIB values decode alike.
+		a := dxf.NewAttribute()
+		a.Value = in
+		if got := a.PlainText(); got != want {
+			t.Errorf("Attribute.PlainText(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

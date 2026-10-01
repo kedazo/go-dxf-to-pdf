@@ -395,7 +395,7 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		case e.MTextFlag&dxf.MTextFlagMultilineAttribute != 0 && e.MText.Text != "":
 			expandMText(bb, m, &e.MText)
 		default:
-			expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), plainText(e.Value), e.TextHeight, e.RelativeXScaleFactor,
+			expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), e.PlainText(), e.TextHeight, e.RelativeXScaleFactor,
 				resolveTextAnchor(e.Location, e.SecondAlignmentPoint, e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
 		}
 	case *dxf.Hatch:
@@ -525,7 +525,7 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 			renderMText(r, &e.MText, m)
 			return
 		}
-		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), plainText(e.Value), e.TextHeight,
+		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), e.PlainText(), e.TextHeight,
 			resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
 				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation),
 			r.lookFor(e.TextStyleName, e.RelativeXScaleFactor, e.ObliqueAngle))

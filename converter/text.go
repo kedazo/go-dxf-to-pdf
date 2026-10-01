@@ -7,14 +7,6 @@ import (
 	dxf "github.com/kedazo/dxf-go"
 )
 
-// plainText decodes a single-line TEXT/ATTRIB value the way the dxf package
-// does for TEXT: %%c %%d %%p (Ø ° ±), %%% (%), %%nnn, \U+XXXX and \M+nXXXX
-// escapes; the %%u/%%o/%%k toggles are dropped.
-func plainText(value string) string {
-	t := dxf.Text{Value: value}
-	return t.PlainText()
-}
-
 // textAnchor is where and how a single-line TEXT (or ATTRIB) is anchored, in
 // the entity's own coordinates.
 type textAnchor struct {
