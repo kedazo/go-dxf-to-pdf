@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	dxf "github.com/kedazo/dxf-go"
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers"
 	"github.com/tdewolff/canvas/renderers/pdf"
@@ -23,11 +24,11 @@ type Renderer struct {
 	paper      PaperSize
 	landscape  bool
 	margin     float64
-	fontFamily *canvas.FontFamily
+	fonts      *fontLib
+	textStyles map[string]textStyle // STYLE table by upper-cased name
 	pageW      float64
 	pageH      float64
 	color      color.RGBA // current entity color (used for text)
-	capRatio   float64    // font cap height / em size, measured lazily
 	clip       *canvas.Rect // page-space clip rectangle (tiled output), nil = none
 
 	// Stroke batching (PDF only, see SetBatching): consecutive strokes with
@@ -82,22 +83,13 @@ func NewRenderer(paper PaperSize, landscape bool, margin float64, fontDir string
 	ctx := canvas.NewContext(c)
 	ctx.SetCoordSystem(canvas.CartesianIV) // Y-down like fpdf
 
-	if fontDir == "" {
-		fontDir = DefaultFontDir()
-	}
-	family := canvas.NewFontFamily("DejaVu")
-	family.LoadFontFile(filepath.Join(fontDir, "DejaVuSans.ttf"), canvas.FontRegular)
-	family.LoadFontFile(filepath.Join(fontDir, "DejaVuSans-Bold.ttf"), canvas.FontBold)
-	family.LoadFontFile(filepath.Join(fontDir, "DejaVuSans-Oblique.ttf"), canvas.FontItalic)
-	family.LoadFontFile(filepath.Join(fontDir, "DejaVuSans-BoldOblique.ttf"), canvas.FontBold|canvas.FontItalic)
-
 	return &Renderer{
 		c:          c,
 		ctx:        ctx,
 		paper:      paper,
 		landscape:  landscape,
 		margin:     margin,
-		fontFamily: family,
+		fonts:      fontLibrary(fontDir),
 		pageW:      w,
 		pageH:      h,
 	}
@@ -366,18 +358,83 @@ const (
 // minTextHeightMM keeps tiny annotation text legible on paper.
 const minTextHeightMM = 0.5
 
-// textFace returns a font face whose cap height is heightMM. CAD text height
-// is the height of capital letters, not the em size.
-func (r *Renderer) textFace(heightMM float64, col color.RGBA, style canvas.FontStyle) *canvas.FontFace {
-	if r.capRatio == 0 {
-		ref := r.fontFamily.Face(100, canvas.Black, canvas.FontRegular, canvas.FontNormal)
-		r.capRatio = 0.729 // DejaVu Sans fallback
-		if m := ref.Metrics(); m.CapHeight > 0 && m.LineHeight > 0 {
-			r.capRatio = m.CapHeight / (100 / 2.83465)
+// textStyle is a STYLE table entry: font name and default width/slant.
+type textStyle struct {
+	font    string
+	width   float64
+	oblique float64 // degrees
+}
+
+// SetTextStyles sets the drawing's STYLE table.
+func (r *Renderer) SetTextStyles(styles []dxf.Style) {
+	r.textStyles = make(map[string]textStyle, len(styles))
+	for _, s := range styles {
+		font := s.PrimaryFontFileName
+		if font == "" {
+			font = s.Name
 		}
+		r.textStyles[strings.ToUpper(s.Name)] = textStyle{font: font, width: s.WidthFactor, oblique: s.ObliqueAngle}
 	}
-	ptSize := heightMM / r.capRatio * 2.83465 // mm to points
-	return r.fontFamily.Face(ptSize, col, style, canvas.FontNormal)
+}
+
+// textLook is how a piece of text is drawn: font and horizontal scale
+// (width factor × substitution compensation) and slant.
+type textLook struct {
+	font    *fontSet
+	width   float64
+	oblique float64 // degrees
+}
+
+// lookFor returns the look of text in the named text style; width and
+// oblique (from the entity, 0 = none given) override the style's.
+func (r *Renderer) lookFor(styleName string, width, oblique float64) textLook {
+	st, ok := r.textStyles[strings.ToUpper(styleName)]
+	if !ok {
+		st = textStyle{width: 1}
+	}
+	if width <= 0 {
+		width = st.width
+	}
+	if width <= 0 {
+		width = 1
+	}
+	if oblique == 0 {
+		oblique = st.oblique
+	}
+	return r.lookWithFont(st.font, width, oblique)
+}
+
+// lookWithFont returns the look for a font name, width factor and slant.
+func (r *Renderer) lookWithFont(font string, width, oblique float64) textLook {
+	fs := r.fonts.font(font)
+	return textLook{font: fs, width: width * fs.widthComp, oblique: oblique}
+}
+
+// styleFont returns the font name of a text style ("" = default).
+func (r *Renderer) styleFont(styleName string) string {
+	return r.textStyles[strings.ToUpper(styleName)].font
+}
+
+// textFace returns a face of the look's font whose cap height is heightMM.
+// CAD text height is the height of capital letters, not the em size.
+func (r *Renderer) textFace(look textLook, heightMM float64, col color.RGBA, style canvas.FontStyle) *canvas.FontFace {
+	return look.font.face(heightMM, col, style)
+}
+
+// drawTextLine draws a text line with its baseline origin at (x, y),
+// stretched horizontally by sx and slanted by obliqueDeg.
+func (r *Renderer) drawTextLine(x, y float64, line *canvas.Text, sx, obliqueDeg float64) {
+	if sx == 1 && obliqueDeg == 0 {
+		r.ctx.DrawText(x, y, line)
+		return
+	}
+	// The page is Y-down: glyph tops lie at smaller y, and a positive
+	// oblique angle leans them to the right.
+	shear := -math.Tan(obliqueDeg * math.Pi / 180)
+	r.ctx.Push()
+	r.ctx.ComposeView(canvas.Identity.Translate(x, y).Scale(sx, 1).Shear(shear, 0).Translate(-x, -y))
+	r.ctx.DrawText(x, y, line)
+	r.ctx.Pop()
 }
 
 // baselineShift returns how far (in page mm, Y-down) the baseline sits below
@@ -397,7 +454,7 @@ func baselineShift(capHeight, descent float64, v textVAlign) float64 {
 
 // DrawText draws a single-line text. hAlign is 0 (left), 0.5 (center) or 1
 // (right) of the text width; vAlign selects the vertical anchor.
-func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hAlign float64, vAlign textVAlign) {
+func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hAlign float64, vAlign textVAlign, look textLook) {
 	if text == "" {
 		return
 	}
@@ -406,22 +463,23 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hA
 	py := r.transform.Y(y)
 	scaledH := max(r.transform.Dist(heightMM), minTextHeightMM)
 
-	face := r.textFace(scaledH, r.color, canvas.FontRegular)
+	face := r.textFace(look, scaledH, r.color, canvas.FontRegular)
 	textLine := canvas.NewTextLine(face, text, canvas.Left)
-	if r.outsideClip(px, py, textLine.Bounds().W()+2*scaledH) {
+	width := textLine.Bounds().W() * look.width
+	if r.outsideClip(px, py, width+2*scaledH) {
 		return
 	}
-	dx := -hAlign * textLine.Bounds().W()
+	dx := -hAlign * width
 	dy := baselineShift(scaledH, face.Metrics().Descent, vAlign)
 
 	if math.Abs(rotationDeg) > 0.01 {
 		r.ctx.Push()
 		// DXF angles are CCW in a Y-up world; the page is Y-down, so negate.
 		r.ctx.ComposeView(canvas.Identity.RotateAbout(-rotationDeg, px, py))
-		r.ctx.DrawText(px+dx, py+dy, textLine)
+		r.drawTextLine(px+dx, py+dy, textLine, look.width, look.oblique)
 		r.ctx.Pop()
 	} else {
-		r.ctx.DrawText(px+dx, py+dy, textLine)
+		r.drawTextLine(px+dx, py+dy, textLine, look.width, look.oblique)
 	}
 }
 
@@ -429,15 +487,17 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hA
 type mtextItem struct {
 	seg   MTextSegment
 	line  *canvas.Text
-	width float64
+	look  textLook
+	width float64 // drawn width (with the look's horizontal scale)
 	h     float64 // cap height in page mm
 	col   color.RGBA
 }
 
 // DrawMText draws multi-line formatted text. attach is the DXF attachment
 // point (1..9: top/middle/bottom × left/center/right); lineSpacing is the
-// MTEXT line spacing factor (0 = default 1.0).
-func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing float64) {
+// MTEXT line spacing factor (0 = default 1.0); font is the text style's font,
+// used where the text sets none.
+func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing float64, font string) {
 	r.flush()
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
@@ -480,11 +540,20 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		if seg.Style.HasColor {
 			textColor = color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
 		}
-		face := r.textFace(scaledH, textColor, fontStyle)
+		segFont := font
+		if seg.Style.FontName != "" {
+			segFont = seg.Style.FontName
+		}
+		width := seg.Style.WidthFactor
+		if width <= 0 {
+			width = 1
+		}
+		look := r.lookWithFont(segFont, width, 0)
+		face := r.textFace(look, scaledH, textColor, fontStyle)
 		textLine := canvas.NewTextLine(face, seg.Text, canvas.Left)
 		last := len(lines) - 1
 		lines[last] = append(lines[last], mtextItem{
-			seg: seg, line: textLine, width: textLine.Bounds().W(), h: scaledH, col: textColor,
+			seg: seg, line: textLine, look: look, width: textLine.Bounds().W() * look.width, h: scaledH, col: textColor,
 		})
 	}
 
@@ -533,7 +602,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		curY := firstBaseline + float64(li)*advance
 
 		for _, it := range items {
-			r.ctx.DrawText(curX, curY, it.line)
+			r.drawTextLine(curX, curY, it.line, it.look.width, it.look.oblique)
 
 			// Underline / strikethrough / overstrike decorations
 			for _, deco := range []struct {

@@ -811,7 +811,8 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 	case *dxf.Text:
 		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.Height,
 			resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
-				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
+				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation),
+			r.lookFor(e.TextStyleName, e.RelativeXScaleFactor, e.ObliqueAngle))
 
 	case *dxf.Attribute:
 		if e.IsInvisible() {
@@ -823,7 +824,8 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		}
 		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.TextHeight,
 			resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
-				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
+				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation),
+			r.lookFor(e.TextStyleName, e.RelativeXScaleFactor, e.ObliqueAngle))
 
 	case *dxf.MText:
 		renderMText(r, e, m)
@@ -910,13 +912,13 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 
 // renderTextLine draws a single-line TEXT/ATTRIB whose anchor is given in the
 // entity's own coordinates, mapped through m.
-func renderTextLine(r *Renderer, m affine, value string, height float64, a textAnchor) {
+func renderTextLine(r *Renderer, m affine, value string, height float64, a textAnchor, look textLook) {
 	x, y, rot, hScale, mirrored := textFrame(m, a.X, a.Y, a.RotationDeg)
 	hAlign := a.HAlign
 	if mirrored {
 		hAlign = 1 - hAlign
 	}
-	r.DrawText(x, y, value, height*hScale, rot, hAlign, a.VAlign)
+	r.DrawText(x, y, value, height*hScale, rot, hAlign, a.VAlign, look)
 }
 
 func renderMText(r *Renderer, e *dxf.MText, m affine) {
@@ -935,7 +937,7 @@ func renderMText(r *Renderer, e *dxf.MText, m affine) {
 		row, col := (attach-1)/3, (attach-1)%3
 		attach = row*3 + (2 - col) + 1
 	}
-	r.DrawMText(x, y, segments, e.InitialTextHeight*hScale, rot, attach, e.LineSpacingFactor)
+	r.DrawMText(x, y, segments, e.InitialTextHeight*hScale, rot, attach, e.LineSpacingFactor, r.styleFont(e.TextStyleName))
 }
 
 // drawEdge draws a straight or bulged (arc) polyline edge given in local

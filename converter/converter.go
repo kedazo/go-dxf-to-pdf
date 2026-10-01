@@ -46,6 +46,13 @@ type LayerInfo struct {
 	Undeclared       bool // used by entities but missing from the LAYER table
 }
 
+// TextStyleInfo describes a text style (STYLE table entry).
+type TextStyleInfo struct {
+	Name  string
+	Font  string  // font file or name the style asks for
+	Width float64 // width factor
+}
+
 // DrawingInfo contains metadata about a DXF/DWG drawing.
 type DrawingInfo struct {
 	Units       string
@@ -55,6 +62,7 @@ type DrawingInfo struct {
 	Blocks      []string
 	EntityCount int
 	LineTypes   []string       // non-continuous line types used by entities or layers
+	TextStyles  []TextStyleInfo
 	Warnings    []string       // what the parser skipped as malformed
 	Unsupported map[string]int // entity types the parser doesn't know, by count
 }
@@ -156,6 +164,17 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 			EntityCount: layerCounts[name], BlockEntityCount: blockCounts[name],
 		})
 	}
+	var textStyles []TextStyleInfo
+	for _, s := range drawing.Styles {
+		if s.Name == "" || s.Flags&1 != 0 { // flag 1: shape file, not a text style
+			continue
+		}
+		font := s.PrimaryFontFileName
+		if font == "" {
+			font = s.Name
+		}
+		textStyles = append(textStyles, TextStyleInfo{Name: s.Name, Font: font, Width: s.WidthFactor})
+	}
 	usedLineTypes := make([]string, 0, len(lineTypes))
 	for name := range lineTypes {
 		usedLineTypes = append(usedLineTypes, name)
@@ -180,6 +199,7 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 		Blocks:      blockNames,
 		EntityCount: len(drawing.Entities),
 		LineTypes:   usedLineTypes,
+		TextStyles:  textStyles,
 		Warnings:    drawing.Warnings,
 		Unsupported: drawing.UnsupportedEntities(),
 	}, nil
@@ -330,6 +350,13 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 	// Layer selection; the page frame follows it.
 	sel := newLayerFilter(opts.Layers)
 	lineTypes := newLineTypes(drawing)
+	newRenderer := func(paper PaperSize, landscape bool) *Renderer {
+		r := NewRenderer(paper, landscape, margin, opts.FontDir)
+		r.SetBatching(isPDF)
+		r.SetLineTypes(lineTypes)
+		r.SetTextStyles(drawing.Styles)
+		return r
+	}
 
 	// Compute bounding box
 	bbox := selectionBBox(drawing.Entities, blockMap, sel)
@@ -360,9 +387,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 			Height: drawH + 2*margin,
 		}
 		// Paper is exactly sized — render directly without landscape swap or auto-fit
-		r := NewRenderer(paper, false, margin, opts.FontDir)
-		r.SetBatching(isPDF)
-		r.SetLineTypes(lineTypes)
+		r := newRenderer(paper, false)
 		t := NewTransform(bbox, effectiveScale, paper, margin, ParseAlignment(opts.Align), false)
 		r.SetTransform(t)
 		RenderEntities(r, drawing.Entities, layerMap, blockMap, sel)
@@ -400,9 +425,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 				unitFactor/fitScale)
 		}
 		t := NewTransform(bbox, fitScale, paper, margin, align, landscape)
-		r := NewRenderer(paper, landscape, margin, opts.FontDir)
-		r.SetBatching(isPDF)
-		r.SetLineTypes(lineTypes)
+		r := newRenderer(paper, landscape)
 		r.SetTransform(t)
 		RenderEntities(r, drawing.Entities, layerMap, blockMap, sel)
 
@@ -429,9 +452,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 
 	grid := ComputeTileGrid(drawW, drawH, printW, printH)
 
-	renderer := NewRenderer(paper, landscape, margin, opts.FontDir)
-	renderer.SetBatching(isPDF)
-	renderer.SetLineTypes(lineTypes)
+	renderer := newRenderer(paper, landscape)
 	totalPages := grid.Cols * grid.Rows
 	boxes := entityBoxes(drawing.Entities, blockMap, sel)
 

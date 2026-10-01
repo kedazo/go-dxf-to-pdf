@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -23,7 +24,7 @@ type CLI struct {
 	DebugBBox   bool     `help:"Draw red bounding box rectangle on the output for debugging."`
 	Crop        string   `optional:"" help:"Crop to bounding box in drawing units: minX,minY,maxX,maxY"`
 	AutoPaper   bool     `help:"Auto-size paper to fit drawing at the given scale."`
-	FontDir     string   `optional:"" help:"Directory containing DejaVuSans*.ttf font files (default: /usr/share/fonts/truetype/dejavu on Linux, executable dir on Windows)."`
+	FontDir     string   `optional:"" help:"Directory with TrueType fonts, searched before the system font directories. Text uses the drawing's font file if found, else metric-compatible Liberation fonts, else DejaVu (see --info)."`
 	Format      string   `optional:"" help:"Output format: pdf, png, jpg (default: auto from file extension)."`
 	DPI         float64  `default:"300" help:"DPI for raster output (PNG/JPG). Default: 300."`
 	Transparent bool     `help:"Transparent PNG background (useful for layer compositing)."`
@@ -90,6 +91,18 @@ func main() {
 
 		if len(info.LineTypes) > 0 {
 			fmt.Printf("\nLine types: %s\n", strings.Join(info.LineTypes, ", "))
+		}
+
+		if len(info.TextStyles) > 0 {
+			fmt.Printf("\nText styles (font → drawn with):\n")
+			for _, s := range info.TextStyles {
+				path, comp := converter.FontSubstitute(s.Font, cli.FontDir)
+				sub := filepath.Base(path)
+				if comp != 1 {
+					sub += fmt.Sprintf(" at %.0f%% width", comp*100)
+				}
+				fmt.Printf("  %-24s %-16s → %s\n", s.Name, s.Font, sub)
+			}
 		}
 
 		if len(info.Blocks) > 0 {
