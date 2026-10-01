@@ -20,6 +20,32 @@ func TestCullEntities(t *testing.T) {
 	}
 }
 
+// Stroke batching flushes every maxPendingSegs segments; arcs and lines that
+// straddle a flush (clipped or not) must keep drawing correctly.
+func TestStrokeBatchingAcrossFlushes(t *testing.T) {
+	paper := PaperSize{Width: 100, Height: 100}
+	r := NewRenderer(paper, false, 0, "")
+	r.SetTransform(NewTransform(BBox{MaxX: 100, MaxY: 100}, 1, paper, 0, AlignTopLeft, false))
+	r.SetBatching(true)
+	r.SetStyle(RGB{}, 0.1)
+	for pass := 0; pass < 2; pass++ {
+		if pass == 1 {
+			r.SetClipRect(10, 10, 80, 80)
+		}
+		for i := 0; i < maxPendingSegs+10; i++ {
+			x := float64(i%100) + 0.5
+			r.DrawLine(x, 0, x, 100)
+			if i%1000 == 0 {
+				r.DrawEllipticArc(50, 50, 30, 0, 0, 30, 0, 6.283185307)
+			}
+		}
+		r.ClipEnd()
+	}
+	if err := r.Save(t.TempDir()+"/out.pdf", "pdf", 0, false); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+}
+
 func TestStrokesClippedToTile(t *testing.T) {
 	paper := PaperSize{Width: 200, Height: 200}
 	r := NewRenderer(paper, false, 0, "")

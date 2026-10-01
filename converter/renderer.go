@@ -28,7 +28,22 @@ type Renderer struct {
 	color      color.RGBA // current entity color (used for text)
 	capRatio   float64    // font cap height / em size, measured lazily
 	clip       *canvas.Rect // page-space clip rectangle (tiled output), nil = none
+
+	// Stroke batching (PDF only, see SetBatching): consecutive strokes with
+	// the same style are collected into one path and drawn in a single call.
+	// Writing one PDF path per segment dominated the cost on large drawings.
+	batch        bool
+	pending      *canvas.Path // batched strokes, page coordinates
+	pendingSegs  int
+	penX, penY   float64 // end point of the last batched segment
+	styleSet     bool    // ctx stroke style matches strokeCol/strokeW
+	fillSet      bool    // ctx fill is opaque (SetFillColor), not the stroke default
+	strokeCol    color.RGBA
+	strokeW      float64
 }
+
+// maxPendingSegs bounds the size of one batched path.
+const maxPendingSegs = 20000
 
 // DefaultFontDir returns the default font directory.
 func DefaultFontDir() string {
@@ -77,15 +92,31 @@ func (r *Renderer) SetTransform(t Transform) {
 	r.transform = t
 }
 
+// SetBatching enables merging same-style strokes into large paths. Only use
+// it for PDF output: canvas' rasterizer strokes a path by settling its
+// outline, which is slow and can panic on large self-intersecting paths, so
+// raster output keeps one path per primitive.
+func (r *Renderer) SetBatching(on bool) {
+	r.flush()
+	r.batch = on
+}
+
 func (r *Renderer) SetStyle(col RGB, lineWidthMM float64) {
 	rgba := color.RGBA{col.R, col.G, col.B, 255}
 	r.color = rgba
+	if r.styleSet && !r.fillSet && rgba == r.strokeCol && lineWidthMM == r.strokeW {
+		return // same style: keep batching
+	}
+	r.flush()
+	r.strokeCol, r.strokeW, r.styleSet, r.fillSet = rgba, lineWidthMM, true, false
 	r.ctx.SetStrokeColor(rgba)
 	r.ctx.SetStrokeWidth(lineWidthMM)
 	r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0}) // transparent fill by default
 }
 
 func (r *Renderer) SetFillColor(col RGB) {
+	r.flush()
+	r.fillSet = true
 	r.ctx.SetFillColor(color.RGBA{col.R, col.G, col.B, 255})
 }
 
@@ -99,17 +130,50 @@ func (r *Renderer) DrawLine(x1, y1, x2, y2 float64) {
 
 // drawLine draws a line in page coordinates (used by DrawLine and crop marks).
 func (r *Renderer) drawLine(x1, y1, x2, y2 float64) {
-	p := &canvas.Path{}
-	p.MoveTo(x1, y1)
-	p.LineTo(x2, y2)
-	r.strokePath(p)
+	r.penTo(x1, y1)
+	r.lineTo(x2, y2)
 }
 
-// strokePath draws a page-coordinate path, clipped to the clip rectangle
-// when one is set (tiled output).
-func (r *Renderer) strokePath(p *canvas.Path) {
+// penTo starts a batched subpath at page point (x, y), unless the previous
+// segment already ended there (then the stroke simply continues, which also
+// gives polylines proper joins).
+func (r *Renderer) penTo(x, y float64) {
+	if !r.batch || r.pendingSegs >= maxPendingSegs {
+		r.flush()
+	}
+	if r.pending == nil {
+		r.pending = &canvas.Path{}
+	}
+	if r.pending.Empty() || math.Abs(x-r.penX) > 1e-9 || math.Abs(y-r.penY) > 1e-9 {
+		r.pending.MoveTo(x, y)
+		r.penX, r.penY = x, y
+	}
+}
+
+func (r *Renderer) lineTo(x, y float64) {
+	r.pending.LineTo(x, y)
+	r.penX, r.penY = x, y
+	r.pendingSegs++
+}
+
+func (r *Renderer) cubeTo(c1x, c1y, c2x, c2y, x, y float64) {
+	r.pending.CubeTo(c1x, c1y, c2x, c2y, x, y)
+	r.penX, r.penY = x, y
+	r.pendingSegs++
+}
+
+// flush draws the batched strokes, clipped to the clip rectangle when one is
+// set (tiled output). Called before anything that changes the style or must
+// keep its place in the drawing order (fills, text, page changes).
+func (r *Renderer) flush() {
+	p := r.pending
+	r.pending, r.pendingSegs = nil, 0
+	if p == nil || p.Empty() {
+		return
+	}
 	if r.clip != nil {
-		p = p.Clip(r.clip.X0, r.clip.Y0, r.clip.X1, r.clip.Y1)
+		// Path.Clip only handles straight segments.
+		p = p.Flatten(canvas.Tolerance).Clip(r.clip.X0, r.clip.Y0, r.clip.X1, r.clip.Y1)
 		if p.Empty() {
 			return
 		}
@@ -129,41 +193,50 @@ func (r *Renderer) outsideClip(px, py, pad float64) bool {
 // conjugate semi-axes, so circles, arcs, ellipses and their images under any
 // affine INSERT transform (mirrored, rotated, non-uniformly scaled) all go
 // through here.
+//
+// The curve is emitted as cubic Béziers (one per ≤90° piece), which are
+// exact up to the usual 4/3·tan(θ/4) circle approximation and stay exact
+// under the affine page transform.
 func (r *Renderer) DrawEllipticArc(cx, cy, ux, uy, vx, vy, t0, t1 float64) {
 	sweep := t1 - t0
-	numSegs := max(int(math.Ceil(math.Abs(sweep)/(2*math.Pi/180))), 4) // ~2° per segment
+	if sweep == 0 {
+		return
+	}
+	n := max(int(math.Ceil(math.Abs(sweep)/(math.Pi/2)-1e-9)), 1)
+	step := sweep / float64(n)
+	k := 4.0 / 3.0 * math.Tan(step/4)
 
-	p := &canvas.Path{}
-	for i, pt := range ellipticArcPoints(cx, cy, ux, uy, vx, vy, t0, t1, numSegs) {
-		px, py := r.transform.X(pt[0]), r.transform.Y(pt[1])
-		if i == 0 {
-			p.MoveTo(px, py)
-		} else {
-			p.LineTo(px, py)
-		}
+	// point and derivative at parameter t, in DXF world coordinates
+	at := func(t float64) (x, y, dx, dy float64) {
+		s, c := math.Sincos(t)
+		return cx + ux*c + vx*s, cy + uy*c + vy*s, -ux*s + vx*c, -uy*s + vy*c
 	}
-	if math.Abs(sweep) >= 2*math.Pi-1e-9 {
-		p.Close()
+	tx, ty := r.transform.X, r.transform.Y
+
+	x0, y0, dx0, dy0 := at(t0)
+	r.penTo(tx(x0), ty(y0))
+	for i := 1; i <= n; i++ {
+		x1, y1, dx1, dy1 := at(t0 + step*float64(i))
+		r.cubeTo(tx(x0+k*dx0), ty(y0+k*dy0), tx(x1-k*dx1), ty(y1-k*dy1), tx(x1), ty(y1))
+		x0, y0, dx0, dy0 = x1, y1, dx1, dy1
 	}
-	r.strokePath(p)
 }
 
 func (r *Renderer) DrawPolyline(points [][2]float64, closed bool) {
 	if len(points) < 2 {
 		return
 	}
-	p := &canvas.Path{}
-	p.MoveTo(r.transform.X(points[0][0]), r.transform.Y(points[0][1]))
+	r.penTo(r.transform.X(points[0][0]), r.transform.Y(points[0][1]))
 	for i := 1; i < len(points); i++ {
-		p.LineTo(r.transform.X(points[i][0]), r.transform.Y(points[i][1]))
+		r.lineTo(r.transform.X(points[i][0]), r.transform.Y(points[i][1]))
 	}
 	if closed && len(points) > 2 {
-		p.Close()
+		r.lineTo(r.transform.X(points[0][0]), r.transform.Y(points[0][1]))
 	}
-	r.strokePath(p)
 }
 
 func (r *Renderer) DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4 float64) {
+	r.flush()
 	p := &canvas.Path{}
 	p.MoveTo(r.transform.X(x1), r.transform.Y(y1))
 	p.LineTo(r.transform.X(x2), r.transform.Y(y2))
@@ -191,6 +264,7 @@ func (r *Renderer) FillPolygons(polys [][][2]float64, col RGB) {
 	if p.Empty() {
 		return
 	}
+	r.flush()
 	r.ctx.Push()
 	r.ctx.SetFillColor(color.RGBA{col.R, col.G, col.B, 255})
 	r.ctx.SetStrokeColor(color.RGBA{0, 0, 0, 0})
@@ -205,6 +279,7 @@ func (r *Renderer) DrawPoint(x, y float64) {
 	if r.outsideClip(px, py, 0.2) {
 		return
 	}
+	r.flush()
 	p := canvas.Circle(0.2)
 	// Circle path is centered around (rx, ry) with radius 0.2
 	r.ctx.Push()
@@ -264,6 +339,7 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hA
 	if text == "" {
 		return
 	}
+	r.flush()
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
 	scaledH := max(r.transform.Dist(heightMM), minTextHeightMM)
@@ -300,6 +376,7 @@ type mtextItem struct {
 // point (1..9: top/middle/bottom × left/center/right); lineSpacing is the
 // MTEXT line spacing factor (0 = default 1.0).
 func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing float64) {
+	r.flush()
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
 	defaultScaledH := max(r.transform.Dist(defaultHeightMM), minTextHeightMM)
@@ -438,19 +515,14 @@ func (r *Renderer) DrawSpline(controlPoints [][2]float64, degree int, knots []fl
 	numSamples := len(controlPoints) * 10
 	points := evaluateBSpline(controlPoints, degree, knots, numSamples)
 
-	p := &canvas.Path{}
-	p.MoveTo(r.transform.X(points[0][0]), r.transform.Y(points[0][1]))
+	r.penTo(r.transform.X(points[0][0]), r.transform.Y(points[0][1]))
 	for i := 1; i < len(points); i++ {
-		p.LineTo(r.transform.X(points[i][0]), r.transform.Y(points[i][1]))
+		r.lineTo(r.transform.X(points[i][0]), r.transform.Y(points[i][1]))
 	}
-	r.strokePath(p)
 }
 
 func (r *Renderer) DrawDebugBBox(bbox BBox) {
-	r.ctx.Push()
-	r.ctx.SetStrokeColor(color.RGBA{255, 0, 0, 255})
-	r.ctx.SetStrokeWidth(0.3)
-	r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
+	r.SetStyle(RGB{255, 0, 0}, 0.3)
 
 	x1 := r.transform.X(bbox.MinX)
 	y1 := r.transform.Y(bbox.MaxY)
@@ -463,16 +535,17 @@ func (r *Renderer) DrawDebugBBox(bbox BBox) {
 	r.drawLine(x1, y2, x1, y1) // left
 	r.drawLine(x1, y1, x2, y2) // diagonal
 	r.drawLine(x1, y2, x2, y1) // diagonal
-
-	r.ctx.Pop()
+	r.flush()
 }
 
 func (r *Renderer) AddPage() {
+	r.flush()
 	r.pages = append(r.pages, r.c)
 	c := canvas.New(r.pageW, r.pageH)
 	r.c = c
 	r.ctx = canvas.NewContext(c)
 	r.ctx.SetCoordSystem(canvas.CartesianIV)
+	r.styleSet = false // fresh context, default style
 }
 
 // SetClipRect restricts subsequent drawing to a page-space rectangle.
@@ -480,16 +553,19 @@ func (r *Renderer) AddPage() {
 // points/text entirely outside are skipped; fills and text straddling the
 // edge are trimmed by MaskOutside for opaque output.
 func (r *Renderer) SetClipRect(x, y, w, h float64) {
+	r.flush()
 	r.clip = &canvas.Rect{X0: x, Y0: y, X1: x + w, Y1: y + h}
 }
 
 func (r *Renderer) ClipEnd() {
+	r.flush()
 	r.clip = nil
 }
 
 // MaskOutside paints the page white outside the given page-space rectangle,
 // hiding whatever spilled over the printable area of a tile.
 func (r *Renderer) MaskOutside(x, y, w, h float64) {
+	r.flush()
 	r.ctx.Push()
 	r.ctx.SetFillColor(color.RGBA{255, 255, 255, 255})
 	r.ctx.SetStrokeColor(color.RGBA{0, 0, 0, 0})
@@ -517,6 +593,7 @@ func (r *Renderer) Save(path string, format string, dpi float64, transparent boo
 	if format == "" {
 		format = formatFromExtension(path)
 	}
+	r.flush()
 
 	allPages := make([]*canvas.Canvas, 0, len(r.pages)+1)
 	allPages = append(allPages, r.pages...)
@@ -614,10 +691,7 @@ func (r *Renderer) DrawRawLine(x1, y1, x2, y2 float64) {
 
 // SetRawStyle sets stroke color and width for page-coordinate drawing.
 func (r *Renderer) SetRawStyle(col RGB, lineWidthMM float64) {
-	rgba := color.RGBA{col.R, col.G, col.B, 255}
-	r.ctx.SetStrokeColor(rgba)
-	r.ctx.SetStrokeWidth(lineWidthMM)
-	r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
+	r.SetStyle(col, lineWidthMM)
 }
 
 // evaluateBSpline evaluates a B-spline curve at numSamples points.

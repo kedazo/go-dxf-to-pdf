@@ -216,16 +216,17 @@ func detectDxfEncoding(data []byte) *charmap.Charmap {
 	// If the file is already valid UTF-8 with non-ASCII content, skip conversion.
 	// Some DXF exporters (e.g. dwg2dxf from LibreDWG) write UTF-8 but declare
 	// $DWGCODEPAGE as ANSI_1250 — converting would double-encode.
-	if utf8.Valid(data) && !isASCIIOnly(data) {
+	hasHigh := !isASCIIOnly(data)
+	if hasHigh && utf8.Valid(data) {
 		return nil
 	}
 
 	// Check for $DWGCODEPAGE header
-	s := string(data)
 	if idx := bytes.Index(data, []byte("$DWGCODEPAGE")); idx >= 0 {
-		// Look for the codepage value (next non-blank value after group code 3)
-		rest := s[idx:]
-		if cp := extractCodepage(rest); cp != "" {
+		// Look for the codepage value (next non-blank value after group code 3);
+		// it sits within the next few lines, so only look at a small window.
+		window := data[idx:min(idx+256, len(data))]
+		if cp := extractCodepage(string(window)); cp != "" {
 			switch cp {
 			case "ANSI_1250":
 				return charmap.Windows1250
@@ -248,13 +249,6 @@ func detectDxfEncoding(data []byte) *charmap.Charmap {
 	}
 
 	// Fallback: if file has high bytes and contains c238 MText markers, assume Windows-1250
-	hasHigh := false
-	for _, b := range data {
-		if b >= 0x80 {
-			hasHigh = true
-			break
-		}
-	}
 	if hasHigh && bytes.Contains(data, []byte("c238")) {
 		return charmap.Windows1250
 	}
@@ -305,6 +299,12 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 	}
 
 	align := ParseAlignment(opts.Align)
+
+	format := opts.Format
+	if format == "" {
+		format = formatFromExtension(pdfPath)
+	}
+	isPDF := format == "pdf"
 
 	// Detect drawing units and compute the unit-to-mm factor
 	unitFactor := UnitsToMM(drawing.Header.DefaultDrawingUnits)
@@ -362,6 +362,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		}
 		// Paper is exactly sized — render directly without landscape swap or auto-fit
 		r := NewRenderer(paper, false, margin, opts.FontDir)
+		r.SetBatching(isPDF)
 		t := NewTransform(bbox, effectiveScale, paper, margin, ParseAlignment(opts.Align), false)
 		r.SetTransform(t)
 		RenderEntities(r, drawing.Entities, layerMap, blockMap, layerFilter)
@@ -400,6 +401,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		}
 		t := NewTransform(bbox, fitScale, paper, margin, align, landscape)
 		r := NewRenderer(paper, landscape, margin, opts.FontDir)
+		r.SetBatching(isPDF)
 		r.SetTransform(t)
 		RenderEntities(r, drawing.Entities, layerMap, blockMap, layerFilter)
 
@@ -427,6 +429,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 	grid := ComputeTileGrid(drawW, drawH, printW, printH)
 
 	renderer := NewRenderer(paper, landscape, margin, opts.FontDir)
+	renderer.SetBatching(isPDF)
 	totalPages := grid.Cols * grid.Rows
 	boxes := entityBoxes(drawing.Entities, blockMap)
 
