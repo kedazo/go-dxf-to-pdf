@@ -323,8 +323,7 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 	// Collect raw segments in DXF world coordinates (identity insert transform).
 	var raws []rawSeg
 	for _, ent := range drawing.Entities {
-		collectSegments(&raws, ent, layerMap, blockMap, layerFilter, opts,
-			0, 0, 0, 0, 0, 1, 1, 0)
+		collectSegments(&raws, ent, layerMap, blockMap, layerFilter, opts, topCtx)
 	}
 
 	// DXF world -> scene meters (Y-down, PNG-aligned). Mirrors transform.go X/Y
@@ -435,9 +434,9 @@ func thicknessClusters(walls []XMLWall, n int) []ThicknessBin {
 // appends instead of drawing.
 func collectSegments(out *[]rawSeg, ent dxf.Entity, layers map[string]dxf.Layer,
 	blocks map[string]*dxf.Block, layerFilter map[string]bool, opts WallSegmentsOptions,
-	depth int, baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg float64) {
+	ctx drawCtx) {
 
-	if depth > 10 || !ent.IsVisible() {
+	if ctx.depth > maxBlockDepth || !ent.IsVisible() {
 		return
 	}
 	if layerFilter != nil {
@@ -446,12 +445,11 @@ func collectSegments(out *[]rawSeg, ent dxf.Entity, layers map[string]dxf.Layer,
 		}
 	}
 
-	_, lwMM := entityStyle(ent, layers)
+	_, lwMM := resolveStyle(ent, layers, ctx)
 	layerName := ent.Layer()
 
-	ai := func(x, y float64) (float64, float64) {
-		return applyInsert(x, y, baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg)
-	}
+	m := ctx.m
+	ai := m.apply
 	add := func(x1, y1, x2, y2 float64, source string, isArc bool) {
 		*out = append(*out, rawSeg{
 			X1: x1, Y1: y1, X2: x2, Y2: y2,
@@ -472,44 +470,44 @@ func collectSegments(out *[]rawSeg, ent dxf.Entity, layers map[string]dxf.Layer,
 			return
 		}
 		closed := e.IsClosed()
+		om := m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation()))
 		for i := 0; i < n; i++ {
 			j := (i + 1) % n
 			if !closed && j == 0 && i != 0 {
 				break
 			}
-			x1, y1 := ai(verts[i].X, verts[i].Y)
-			x2, y2 := ai(verts[j].X, verts[j].Y)
+			x1, y1 := om.apply(verts[i].X, verts[i].Y)
+			x2, y2 := om.apply(verts[j].X, verts[j].Y)
 			add(x1, y1, x2, y2, "LWPOLYLINE", math.Abs(verts[i].Bulge) > 1e-10)
 		}
 
 	case *dxf.Polyline:
+		om := m.mul(polyline2DAffine(e))
 		for _, edge := range polylineEdges(e) {
-			x1, y1 := ai(edge.X1, edge.Y1)
-			x2, y2 := ai(edge.X2, edge.Y2)
+			x1, y1 := om.apply(edge.X1, edge.Y1)
+			x2, y2 := om.apply(edge.X2, edge.Y2)
 			add(x1, y1, x2, y2, "POLYLINE", math.Abs(edge.Bulge) > 1e-10)
 		}
 
 	case *dxf.Arc:
 		if opts.IncludeCurves {
-			addArcChords(add, e.Center.X, e.Center.Y, e.Radius, e.StartAngle, e.EndAngle, ai, "ARC")
+			addArcChords(add, e.Center.X, e.Center.Y, e.Radius, e.StartAngle, e.EndAngle,
+				m.mul(ocsAffine(e.Normal, e.Center.Z)).apply, "ARC")
 		}
 
 	case *dxf.Circle:
 		if opts.IncludeCurves {
-			addArcChords(add, e.Center.X, e.Center.Y, e.Radius, 0, 360, ai, "CIRCLE")
+			addArcChords(add, e.Center.X, e.Center.Y, e.Radius, 0, 360,
+				m.mul(ocsAffine(e.Normal, e.Center.Z)).apply, "CIRCLE")
 		}
 
 	case *dxf.Insert:
-		// Transform INSERT position to world coords, then recurse with block base point.
 		if blk, ok := blocks[e.Name]; ok {
-			wx, wy := ai(e.Location.X, e.Location.Y)
-			newScaleX := insScaleX * e.XScaleFactor
-			newScaleY := insScaleY * e.YScaleFactor
-			newRot := insRotDeg + e.Rotation
-			for _, be := range blk.Entities {
-				collectSegments(out, be, layers, blocks, layerFilter, opts, depth+1,
-					blk.BasePoint.X, blk.BasePoint.Y,
-					wx, wy, newScaleX, newScaleY, newRot)
+			for _, local := range insertInstances(e, blk.BasePoint) {
+				cctx := ctx.child(e, local, layers)
+				for _, be := range blk.Entities {
+					collectSegments(out, be, layers, blocks, layerFilter, opts, cctx)
+				}
 			}
 		}
 

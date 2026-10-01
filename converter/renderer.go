@@ -104,83 +104,25 @@ func (r *Renderer) drawLine(x1, y1, x2, y2 float64) {
 	r.ctx.DrawPath(0, 0, p)
 }
 
-func (r *Renderer) DrawCircle(cx, cy, radius float64) {
-	// Use arc sampling for consistency (avoids canvas Circle positioning issues with CartesianIV)
-	r.DrawArc(cx, cy, radius, 0, 360)
-}
-
-func (r *Renderer) DrawArc(cx, cy, radius, startAngleDeg, endAngleDeg float64) {
-	// Sample arc into line segments in DXF coordinates, then transform each point.
-	// This avoids all angle/positioning complexity with canvas's arc API.
-	sweep := endAngleDeg - startAngleDeg
-	numSegs := int(math.Ceil(math.Abs(sweep) / 2.0)) // ~2° per segment
-	if numSegs < 4 {
-		numSegs = 4
-	}
+// DrawEllipticArc draws the curve c + u·cos(t) + v·sin(t) for t from t0 to t1
+// (radians; t1 < t0 runs clockwise), in DXF world coordinates. u and v are
+// conjugate semi-axes, so circles, arcs, ellipses and their images under any
+// affine INSERT transform (mirrored, rotated, non-uniformly scaled) all go
+// through here.
+func (r *Renderer) DrawEllipticArc(cx, cy, ux, uy, vx, vy, t0, t1 float64) {
+	sweep := t1 - t0
+	numSegs := max(int(math.Ceil(math.Abs(sweep)/(2*math.Pi/180))), 4) // ~2° per segment
 
 	p := &canvas.Path{}
-	for i := 0; i <= numSegs; i++ {
-		t := float64(i) / float64(numSegs)
-		angleDeg := startAngleDeg + t*sweep
-		angleRad := angleDeg * math.Pi / 180
-		// Point on arc in DXF coordinates
-		dxfX := cx + radius*math.Cos(angleRad)
-		dxfY := cy + radius*math.Sin(angleRad)
-		px := r.transform.X(dxfX)
-		py := r.transform.Y(dxfY)
+	for i, pt := range ellipticArcPoints(cx, cy, ux, uy, vx, vy, t0, t1, numSegs) {
+		px, py := r.transform.X(pt[0]), r.transform.Y(pt[1])
 		if i == 0 {
 			p.MoveTo(px, py)
 		} else {
 			p.LineTo(px, py)
 		}
 	}
-	r.ctx.DrawPath(0, 0, p)
-}
-
-func (r *Renderer) DrawEllipse(cx, cy, majorX, majorY, minorRatio, startAngleRad, endAngleRad float64) {
-	majorLen := math.Sqrt(majorX*majorX + majorY*majorY)
-	minorLen := majorLen * minorRatio
-	rotRad := math.Atan2(majorY, majorX)
-
-	isFullEllipse := math.Abs(endAngleRad-startAngleRad-2*math.Pi) < 0.001 ||
-		(startAngleRad == 0 && endAngleRad == 0)
-
-	startA := startAngleRad
-	endA := endAngleRad
-	if isFullEllipse {
-		startA = 0
-		endA = 2 * math.Pi
-	}
-
-	// Sample ellipse arc in DXF coordinates, then transform each point.
-	sweep := endA - startA
-	numSegs := int(math.Ceil(math.Abs(sweep) / (2.0 * math.Pi / 180))) // ~2° per segment
-	if numSegs < 4 {
-		numSegs = 4
-	}
-
-	cosR := math.Cos(rotRad)
-	sinR := math.Sin(rotRad)
-
-	p := &canvas.Path{}
-	for i := 0; i <= numSegs; i++ {
-		t := float64(i) / float64(numSegs)
-		angle := startA + t*sweep
-		// Point on unrotated ellipse
-		ex := majorLen * math.Cos(angle)
-		ey := minorLen * math.Sin(angle)
-		// Rotate by ellipse rotation
-		dxfX := cx + ex*cosR - ey*sinR
-		dxfY := cy + ex*sinR + ey*cosR
-		px := r.transform.X(dxfX)
-		py := r.transform.Y(dxfY)
-		if i == 0 {
-			p.MoveTo(px, py)
-		} else {
-			p.LineTo(px, py)
-		}
-	}
-	if isFullEllipse {
+	if math.Abs(sweep) >= 2*math.Pi-1e-9 {
 		p.Close()
 	}
 	r.ctx.DrawPath(0, 0, p)
@@ -199,49 +141,6 @@ func (r *Renderer) DrawPolyline(points [][2]float64, closed bool) {
 		p.Close()
 	}
 	r.ctx.DrawPath(0, 0, p)
-}
-
-func (r *Renderer) DrawBulgeArc(x1, y1, x2, y2, bulge float64) {
-	if math.Abs(bulge) < 1e-10 {
-		r.DrawLine(x1, y1, x2, y2)
-		return
-	}
-
-	dx := x2 - x1
-	dy := y2 - y1
-	chordLen := math.Sqrt(dx*dx + dy*dy)
-	sagitta := math.Abs(bulge) * chordLen / 2
-	radius := (chordLen*chordLen/4 + sagitta*sagitta) / (2 * sagitta)
-
-	mx := (x1 + x2) / 2
-	my := (y1 + y2) / 2
-
-	px := -dy / chordLen
-	py := dx / chordLen
-
-	d := radius - sagitta
-	if bulge < 0 {
-		d = -d
-	}
-
-	cx := mx + px*d
-	cy := my + py*d
-
-	startAngle := math.Atan2(y1-cy, x1-cx) * 180 / math.Pi
-	endAngle := math.Atan2(y2-cy, x2-cx) * 180 / math.Pi
-
-	if bulge > 0 {
-		if endAngle < startAngle {
-			endAngle += 360
-		}
-	} else {
-		startAngle, endAngle = endAngle, startAngle
-		if endAngle < startAngle {
-			endAngle += 360
-		}
-	}
-
-	r.DrawArc(cx, cy, radius, startAngle, endAngle)
 }
 
 func (r *Renderer) DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4 float64) {

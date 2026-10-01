@@ -415,33 +415,78 @@ func parseInt(s string) (int, error) {
 	return v, err
 }
 
-// entityStyle resolves the color and line weight for an entity, considering layer inheritance.
-func entityStyle(entity dxf.Entity, layers map[string]dxf.Layer) (RGB, float64) {
-	layerName := entity.Layer()
-	layer, hasLayer := layers[layerName]
+// drawCtx is the state inherited from enclosing INSERTs while walking
+// entities: the block-local → world transform plus the INSERT's resolved
+// style, which entities with ByBlock color/lineweight and entities on layer
+// "0" take over.
+type drawCtx struct {
+	m     affine
+	depth int
+	layer string  // effective layer for block entities on layer "0" ("" = top level)
+	color RGB     // ByBlock color
+	lw    float64 // ByBlock line weight (mm)
+}
 
-	// Resolve color
-	entColor := entity.Color()
+// maxBlockDepth guards against runaway (or cyclic) block nesting.
+const maxBlockDepth = 10
+
+var topCtx = drawCtx{m: identityAffine, lw: defaultLineWidthMM}
+
+// effectiveLayer returns the layer an entity behaves as being on: entities
+// on layer "0" inside a block inherit the INSERT's layer.
+func (ctx drawCtx) effectiveLayer(ent dxf.Entity) string {
+	if l := ent.Layer(); l != "0" || ctx.layer == "" {
+		return l
+	}
+	return ctx.layer
+}
+
+// child returns the context for the entities of a block inserted by ins
+// with instance transform local.
+func (ctx drawCtx) child(ins dxf.Entity, local affine, layers map[string]dxf.Layer) drawCtx {
+	rgb, lw := resolveStyle(ins, layers, ctx)
+	return drawCtx{
+		m:     ctx.m.mul(local),
+		depth: ctx.depth + 1,
+		layer: ctx.effectiveLayer(ins),
+		color: rgb,
+		lw:    lw,
+	}
+}
+
+// resolveStyle resolves an entity's color and line weight: true color wins,
+// then ACI; ByLayer uses the (effective) layer, ByBlock the enclosing INSERT.
+func resolveStyle(entity dxf.Entity, layers map[string]dxf.Layer, ctx drawCtx) (RGB, float64) {
+	layer, hasLayer := layers[ctx.effectiveLayer(entity)]
+
 	var rgb RGB
-	colorVal := int16(entColor)
+	entColor := entity.Color()
 	switch {
+	case entity.Color24Bit() != 0:
+		c := entity.Color24Bit()
+		rgb = RGB{uint8(c >> 16), uint8(c >> 8), uint8(c)}
 	case entColor == dxf.ByLayer():
 		if hasLayer {
-			rgb = ACIToRGB(int16(layer.Color))
-		} else {
-			rgb = RGB{0, 0, 0}
+			// A negative layer color only means "layer off"; keep the hue.
+			idx := int16(layer.Color)
+			if idx < 0 {
+				idx = -idx
+			}
+			rgb = ACIToRGB(idx)
 		}
 	case entColor == dxf.ByBlock():
-		rgb = RGB{0, 0, 0}
+		rgb = ctx.color
 	default:
-		rgb = ACIToRGB(colorVal)
+		rgb = ACIToRGB(int16(entColor))
 	}
 
-	// Resolve line weight
 	var lw float64
-	if hasLayer {
-		lw = ResolveLineWeight(entity.LineWeight(), layer.LineWeight)
-	} else {
+	switch v := int16(entity.LineWeight()); {
+	case v == -1: // ByBlock
+		lw = ctx.lw
+	case v == -2 && hasLayer: // ByLayer
+		lw = LineWeightToMM(layer.LineWeight)
+	default:
 		lw = LineWeightToMM(entity.LineWeight())
 	}
 
@@ -449,128 +494,161 @@ func entityStyle(entity dxf.Entity, layers map[string]dxf.Layer) (RGB, float64) 
 }
 
 // ComputeBoundingBox computes the bounding box of all entities in world coordinates.
-// For top-level entities, the insert transform is identity (offset=0, scale=1, rotation=0).
-// For entities inside INSERT blocks, the accumulated insert transform converts
-// block-local coordinates to world coordinates so the bbox captures the actual placement.
+// Entities inside INSERT blocks are mapped through the accumulated insert
+// transform so the bbox captures their actual placement.
 func ComputeBoundingBox(entities []dxf.Entity, blocks map[string]*dxf.Block) BBox {
 	bb := NewBBox()
 	for _, ent := range entities {
-		expandBBoxForEntity(&bb, ent, blocks, 0, 0, 0, 0, 0, 1, 1, 0)
+		expandBBoxForEntity(&bb, ent, blocks, identityAffine, 0)
 	}
 	return bb
 }
 
-// expandBBoxForEntity expands the bounding box with the given entity's coordinates.
-// The insert transform parameters represent the accumulated transformation:
-//   - baseX, baseY: block base point to subtract before scaling
-//   - insX, insY: translation offset (world-space insert position)
-//   - scX, scY: scale factors (product of all nested insert scales)
-//   - rotDeg: rotation in degrees (sum of all nested insert rotations)
-// For top-level entities these are all zero/identity (0,0, 0,0, 1,1, 0).
-func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
-	depth int, baseX, baseY, insX, insY, scX, scY, rotDeg float64) {
-	if depth > 10 || !ent.IsVisible() {
+// curve geometry shared by rendering and bbox computation
+
+// circleArcAxes returns the world center and conjugate semi-axes of a circle
+// (radius r around local cx, cy) under m.
+func circleArcAxes(m affine, cx, cy, r float64) (wcx, wcy, ux, uy, vx, vy float64) {
+	wcx, wcy = m.apply(cx, cy)
+	ux, uy = m.applyVec(r, 0)
+	vx, vy = m.applyVec(0, r)
+	return
+}
+
+// arcParams returns the CCW parameter range of an ARC (angles in degrees).
+func arcParams(startDeg, endDeg float64) (t0, t1 float64) {
+	t0 = startDeg * math.Pi / 180
+	t1 = endDeg * math.Pi / 180
+	for t1 <= t0 {
+		t1 += 2 * math.Pi
+	}
+	return t0, t1
+}
+
+// ellipseAxes returns the local conjugate semi-axes and parameter range of an
+// ELLIPSE. The minor axis is normal × major (scaled by the ratio), so ellipses
+// with a negative normal run the other way round.
+func ellipseAxes(e *dxf.Ellipse) (ux, uy, vx, vy, t0, t1 float64) {
+	n := e.Normal
+	if n.X == 0 && n.Y == 0 && n.Z == 0 {
+		n.Z = 1
+	}
+	mj := e.MajorAxis
+	ux, uy = mj.X, mj.Y
+	vx = e.MinorAxisRatio * (n.Y*mj.Z - n.Z*mj.Y)
+	vy = e.MinorAxisRatio * (n.Z*mj.X - n.X*mj.Z)
+
+	t0, t1 = e.StartAngle, e.EndAngle
+	if (t0 == 0 && t1 == 0) || math.Abs(t1-t0-2*math.Pi) < 1e-9 {
+		return ux, uy, vx, vy, 0, 2 * math.Pi
+	}
+	for t1 <= t0 {
+		t1 += 2 * math.Pi
+	}
+	return ux, uy, vx, vy, t0, t1
+}
+
+// polyline2DAffine returns the OCS transform of a POLYLINE: 2D polylines
+// live in their OCS, 3D polylines and meshes in world coordinates.
+func polyline2DAffine(p *dxf.Polyline) affine {
+	if p.Is3DPolyline() || p.Is3DPolygonMesh() || p.IsPolyfaceMesh() {
+		return identityAffine
+	}
+	return ocsAffine(p.Normal, p.Location.Z)
+}
+
+func expandEllipticArc(bb *BBox, cx, cy, ux, uy, vx, vy, t0, t1 float64) {
+	if t1-t0 >= 2*math.Pi-1e-9 {
+		hw, hh := math.Hypot(ux, vx), math.Hypot(uy, vy)
+		bb.Expand(cx-hw, cy-hh)
+		bb.Expand(cx+hw, cy+hh)
+		return
+	}
+	for _, p := range ellipticArcPoints(cx, cy, ux, uy, vx, vy, t0, t1, 32) {
+		bb.Expand(p[0], p[1])
+	}
+}
+
+// expandBBoxForEntity expands the bounding box with the given entity, mapped
+// through m (block-local → world).
+func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block, m affine, depth int) {
+	if depth > maxBlockDepth || !ent.IsVisible() {
 		return
 	}
 
-	// wx transforms a point from block-local to world coordinates.
-	wx := func(x, y float64) (float64, float64) {
-		return applyInsert(x, y, baseX, baseY, insX, insY, scX, scY, rotDeg)
+	expand := func(t affine, x, y float64) {
+		bb.Expand(t.apply(x, y))
 	}
 
 	switch e := ent.(type) {
 	case *dxf.Line:
-		x1, y1 := wx(e.P1.X, e.P1.Y)
-		x2, y2 := wx(e.P2.X, e.P2.Y)
-		bb.Expand(x1, y1)
-		bb.Expand(x2, y2)
+		expand(m, e.P1.X, e.P1.Y)
+		expand(m, e.P2.X, e.P2.Y)
 	case *dxf.Circle:
-		cx, cy := wx(e.Center.X, e.Center.Y)
-		r := e.Radius * math.Abs(scX)
-		bb.Expand(cx-r, cy-r)
-		bb.Expand(cx+r, cy+r)
+		cx, cy, ux, uy, vx, vy := circleArcAxes(m.mul(ocsAffine(e.Normal, e.Center.Z)), e.Center.X, e.Center.Y, e.Radius)
+		expandEllipticArc(bb, cx, cy, ux, uy, vx, vy, 0, 2*math.Pi)
 	case *dxf.Arc:
-		cx, cy := wx(e.Center.X, e.Center.Y)
-		r := e.Radius * math.Abs(scX)
-		bb.Expand(cx-r, cy-r)
-		bb.Expand(cx+r, cy+r)
+		cx, cy, ux, uy, vx, vy := circleArcAxes(m.mul(ocsAffine(e.Normal, e.Center.Z)), e.Center.X, e.Center.Y, e.Radius)
+		t0, t1 := arcParams(e.StartAngle, e.EndAngle)
+		expandEllipticArc(bb, cx, cy, ux, uy, vx, vy, t0, t1)
 	case *dxf.Ellipse:
-		cx, cy := wx(e.Center.X, e.Center.Y)
-		majorLen := math.Sqrt(e.MajorAxis.X*e.MajorAxis.X+e.MajorAxis.Y*e.MajorAxis.Y) * math.Abs(scX)
-		bb.Expand(cx-majorLen, cy-majorLen)
-		bb.Expand(cx+majorLen, cy+majorLen)
+		lux, luy, lvx, lvy, t0, t1 := ellipseAxes(e)
+		cx, cy := m.apply(e.Center.X, e.Center.Y)
+		ux, uy := m.applyVec(lux, luy)
+		vx, vy := m.applyVec(lvx, lvy)
+		expandEllipticArc(bb, cx, cy, ux, uy, vx, vy, t0, t1)
 	case *dxf.LWPolyline:
+		om := m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation()))
 		for _, v := range e.Vertices {
-			x, y := wx(v.X, v.Y)
-			bb.Expand(x, y)
+			expand(om, v.X, v.Y)
 		}
 	case *dxf.Polyline:
 		// Use the edges, not the raw vertices: polyface face records sit at
 		// (0,0,0) and would drag the bbox to the origin.
+		om := m.mul(polyline2DAffine(e))
 		for _, edge := range polylineEdges(e) {
-			x1, y1 := wx(edge.X1, edge.Y1)
-			x2, y2 := wx(edge.X2, edge.Y2)
-			bb.Expand(x1, y1)
-			bb.Expand(x2, y2)
+			expand(om, edge.X1, edge.Y1)
+			expand(om, edge.X2, edge.Y2)
 		}
 	case *dxf.Spline:
 		for _, cp := range e.ControlPoints {
-			x, y := wx(cp.Point.X, cp.Point.Y)
-			bb.Expand(x, y)
+			expand(m, cp.Point.X, cp.Point.Y)
 		}
 	case *dxf.Text:
-		x, y := wx(e.Location.X, e.Location.Y)
-		bb.Expand(x, y)
+		expand(m.mul(ocsAffine(e.Normal, e.Location.Z)), e.Location.X, e.Location.Y)
 	case *dxf.MText:
-		x, y := wx(e.InsertionPoint.X, e.InsertionPoint.Y)
-		bb.Expand(x, y)
+		expand(m, e.InsertionPoint.X, e.InsertionPoint.Y)
 	case *dxf.ModelPoint:
-		x, y := wx(e.Location.X, e.Location.Y)
-		bb.Expand(x, y)
+		expand(m, e.Location.X, e.Location.Y)
 	case *dxf.Solid:
-		x1, y1 := wx(e.FirstCorner.X, e.FirstCorner.Y)
-		x2, y2 := wx(e.SecondCorner.X, e.SecondCorner.Y)
-		x3, y3 := wx(e.ThirdCorner.X, e.ThirdCorner.Y)
-		x4, y4 := wx(e.FourthCorner.X, e.FourthCorner.Y)
-		bb.Expand(x1, y1)
-		bb.Expand(x2, y2)
-		bb.Expand(x3, y3)
-		bb.Expand(x4, y4)
+		om := m.mul(ocsAffine(e.ExtrusionDirection, e.FirstCorner.Z))
+		for _, p := range []dxf.Point{e.FirstCorner, e.SecondCorner, e.ThirdCorner, e.FourthCorner} {
+			expand(om, p.X, p.Y)
+		}
 	case *dxf.Insert:
-		// INSERT places a block at a given position with scale and rotation.
-		// The transform for block entities is:
-		//   world = (entity - blockBasePoint) * insertScale * insertRotation + insertPosition
-		// We first transform the INSERT's own position to world coords (applying parent transform),
-		// then use the block's base point as the new baseX/baseY for child entities.
 		if blk, ok := blocks[e.Name]; ok {
-			// Transform INSERT position to world coordinates
-			wx, wy := applyInsert(e.Location.X, e.Location.Y, baseX, baseY, insX, insY, scX, scY, rotDeg)
-			newScaleX := scX * e.XScaleFactor
-			newScaleY := scY * e.YScaleFactor
-			newRot := rotDeg + e.Rotation
-			for _, be := range blk.Entities {
-				expandBBoxForEntity(bb, be, blocks, depth+1,
-					blk.BasePoint.X, blk.BasePoint.Y,
-					wx, wy, newScaleX, newScaleY, newRot)
+			for _, local := range insertInstances(e, blk.BasePoint) {
+				cm := m.mul(local)
+				for _, be := range blk.Entities {
+					expandBBoxForEntity(bb, be, blocks, cm, depth+1)
+				}
 			}
 		}
 		for i := range e.Attributes {
-			expandBBoxForEntity(bb, &e.Attributes[i], blocks, depth+1,
-				baseX, baseY, insX, insY, scX, scY, rotDeg)
+			expandBBoxForEntity(bb, &e.Attributes[i], blocks, m, depth+1)
 		}
 	case *dxf.Attribute:
 		if !e.IsInvisible() {
-			x, y := wx(e.Location.X, e.Location.Y)
-			bb.Expand(x, y)
+			expand(m.mul(ocsAffine(e.Normal, e.Location.Z)), e.Location.X, e.Location.Y)
 		}
 
 	default:
-		// DIMENSION entities reference an anonymous block containing their geometry.
+		// DIMENSION entities reference an anonymous block containing their
+		// geometry in world coordinates (relative to the dimension's space).
 		if dim, ok := ent.(dxf.Dimension); ok {
 			if blk, ok := blocks[dim.BlockName()]; ok {
 				for _, be := range blk.Entities {
-					expandBBoxForEntity(bb, be, blocks, depth+1,
-						0, 0, 0, 0, 1, 1, 0)
+					expandBBoxForEntity(bb, be, blocks, m, depth+1)
 				}
 			}
 		}
@@ -582,112 +660,96 @@ func RenderEntities(r *Renderer, entities []dxf.Entity, layers map[string]dxf.La
 	blocks map[string]*dxf.Block, layerFilter map[string]bool) {
 
 	for _, ent := range entities {
-		renderEntity(r, ent, layers, blocks, layerFilter, 0, 0, 0, 0, 0, 1, 1, 0)
+		renderEntity(r, ent, layers, blocks, layerFilter, topCtx)
 	}
 }
 
 func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
-	blocks map[string]*dxf.Block, layerFilter map[string]bool,
-	depth int, baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg float64) {
+	blocks map[string]*dxf.Block, layerFilter map[string]bool, ctx drawCtx) {
 
-	if depth > 10 || !ent.IsVisible() {
+	if ctx.depth > maxBlockDepth || !ent.IsVisible() {
 		return
 	}
 
-	// Layer filter
+	// Layer filter (entities on layer "0" inside blocks follow the INSERT)
 	if layerFilter != nil {
-		if _, ok := layerFilter[ent.Layer()]; !ok {
+		if _, ok := layerFilter[ctx.effectiveLayer(ent)]; !ok {
 			return
 		}
 	}
 
-	rgb, lw := entityStyle(ent, layers)
+	rgb, lw := resolveStyle(ent, layers, ctx)
 	r.SetStyle(rgb, lw)
-
-	ai := func(x, y float64) (float64, float64) {
-		return applyInsert(x, y, baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg)
-	}
+	m := ctx.m
 
 	switch e := ent.(type) {
 	case *dxf.Line:
-		x1, y1 := ai(e.P1.X, e.P1.Y)
-		x2, y2 := ai(e.P2.X, e.P2.Y)
+		x1, y1 := m.apply(e.P1.X, e.P1.Y)
+		x2, y2 := m.apply(e.P2.X, e.P2.Y)
 		r.DrawLine(x1, y1, x2, y2)
 
 	case *dxf.Circle:
-		cx, cy := ai(e.Center.X, e.Center.Y)
-		r.DrawCircle(cx, cy, e.Radius*math.Abs(insScaleX))
+		cx, cy, ux, uy, vx, vy := circleArcAxes(m.mul(ocsAffine(e.Normal, e.Center.Z)), e.Center.X, e.Center.Y, e.Radius)
+		r.DrawEllipticArc(cx, cy, ux, uy, vx, vy, 0, 2*math.Pi)
 
 	case *dxf.Arc:
-		cx, cy := ai(e.Center.X, e.Center.Y)
-		// Transform arc start/end points through the INSERT transform, then
-		// recompute angles via atan2. This correctly handles any combination
-		// of mirroring, rotation, and scaling.
-		rad := e.Radius
-		sx := e.Center.X + rad*math.Cos(e.StartAngle*math.Pi/180)
-		sy := e.Center.Y + rad*math.Sin(e.StartAngle*math.Pi/180)
-		ex := e.Center.X + rad*math.Cos(e.EndAngle*math.Pi/180)
-		ey := e.Center.Y + rad*math.Sin(e.EndAngle*math.Pi/180)
-		tsx, tsy := ai(sx, sy)
-		tex, tey := ai(ex, ey)
-		startA := math.Atan2(tsy-cy, tsx-cx) * 180 / math.Pi
-		endA := math.Atan2(tey-cy, tex-cx) * 180 / math.Pi
-		// Ensure CCW winding: if mirrored, the winding reverses so we swap
-		if insScaleX*insScaleY < 0 {
-			startA, endA = endA, startA
-		}
-		if endA <= startA {
-			endA += 360
-		}
-		r.DrawArc(cx, cy, e.Radius*math.Abs(insScaleX), startA, endA)
+		cx, cy, ux, uy, vx, vy := circleArcAxes(m.mul(ocsAffine(e.Normal, e.Center.Z)), e.Center.X, e.Center.Y, e.Radius)
+		t0, t1 := arcParams(e.StartAngle, e.EndAngle)
+		r.DrawEllipticArc(cx, cy, ux, uy, vx, vy, t0, t1)
 
 	case *dxf.Ellipse:
-		cx, cy := ai(e.Center.X, e.Center.Y)
-		r.DrawEllipse(cx, cy, e.MajorAxis.X*insScaleX, e.MajorAxis.Y*insScaleY,
-			e.MinorAxisRatio, e.StartAngle, e.EndAngle)
+		lux, luy, lvx, lvy, t0, t1 := ellipseAxes(e)
+		cx, cy := m.apply(e.Center.X, e.Center.Y)
+		ux, uy := m.applyVec(lux, luy)
+		vx, vy := m.applyVec(lvx, lvy)
+		r.DrawEllipticArc(cx, cy, ux, uy, vx, vy, t0, t1)
 
 	case *dxf.LWPolyline:
-		renderLWPolyline(r, e, baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg)
+		renderLWPolyline(r, e, m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation())))
 
 	case *dxf.Polyline:
-		renderPolyline(r, e, baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg)
+		om := m.mul(polyline2DAffine(e))
+		for _, edge := range polylineEdges(e) {
+			drawEdge(r, om, edge.X1, edge.Y1, edge.X2, edge.Y2, edge.Bulge)
+		}
 
 	case *dxf.Spline:
-		renderSpline(r, e, baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg)
+		cps := make([][2]float64, len(e.ControlPoints))
+		for i, cp := range e.ControlPoints {
+			x, y := m.apply(cp.Point.X, cp.Point.Y)
+			cps[i] = [2]float64{x, y}
+		}
+		r.DrawSpline(cps, e.DegreeOfCurve, e.KnotValues)
 
 	case *dxf.Text:
-		a := resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
-			e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation)
-		x, y := ai(a.X, a.Y)
-		r.DrawText(x, y, decodeTextValue(e.Value), e.Height*math.Abs(insScaleY),
-			a.RotationDeg+insRotDeg, a.HAlign, a.VAlign)
+		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.Height,
+			resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
+				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
 
 	case *dxf.Attribute:
 		if e.IsInvisible() {
 			return
 		}
 		if e.MTextFlag&dxf.MTextFlagMultilineAttribute != 0 && e.MText.Text != "" {
-			renderMText(r, &e.MText, ai, insScaleY, insRotDeg)
+			renderMText(r, &e.MText, m)
 			return
 		}
-		a := resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
-			e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation)
-		x, y := ai(a.X, a.Y)
-		r.DrawText(x, y, decodeTextValue(e.Value), e.TextHeight*math.Abs(insScaleY),
-			a.RotationDeg+insRotDeg, a.HAlign, a.VAlign)
+		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.TextHeight,
+			resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
+				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
 
 	case *dxf.MText:
-		renderMText(r, e, ai, insScaleY, insRotDeg)
+		renderMText(r, e, m)
 
 	case *dxf.ModelPoint:
-		x, y := ai(e.Location.X, e.Location.Y)
-		r.DrawPoint(x, y)
+		r.DrawPoint(m.apply(e.Location.X, e.Location.Y))
 
 	case *dxf.Solid:
-		x1, y1 := ai(e.FirstCorner.X, e.FirstCorner.Y)
-		x2, y2 := ai(e.SecondCorner.X, e.SecondCorner.Y)
-		x3, y3 := ai(e.ThirdCorner.X, e.ThirdCorner.Y)
-		x4, y4 := ai(e.FourthCorner.X, e.FourthCorner.Y)
+		om := m.mul(ocsAffine(e.ExtrusionDirection, e.FirstCorner.Z))
+		x1, y1 := om.apply(e.FirstCorner.X, e.FirstCorner.Y)
+		x2, y2 := om.apply(e.SecondCorner.X, e.SecondCorner.Y)
+		x3, y3 := om.apply(e.ThirdCorner.X, e.ThirdCorner.Y)
+		x4, y4 := om.apply(e.FourthCorner.X, e.FourthCorner.Y)
 		r.SetStyle(rgb, 0)
 		r.SetFillColor(rgb)
 		r.DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4)
@@ -697,30 +759,26 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 			r.SetStyle(rgb, 0.05) // thin lines for hatch fill
 			lines := generateHatchFillLines(e)
 			for _, seg := range lines {
-				x1, y1 := ai(seg[0], seg[1])
-				x2, y2 := ai(seg[2], seg[3])
+				x1, y1 := m.apply(seg[0], seg[1])
+				x2, y2 := m.apply(seg[2], seg[3])
 				r.DrawLine(x1, y1, x2, y2)
 			}
 		}
 
 	case *dxf.Insert:
-		// Transform INSERT position to world coords, then recurse with block's base point.
 		if blk, ok := blocks[e.Name]; ok {
-			wx, wy := ai(e.Location.X, e.Location.Y)
-			newScaleX := insScaleX * e.XScaleFactor
-			newScaleY := insScaleY * e.YScaleFactor
-			newRot := insRotDeg + e.Rotation
-			for _, be := range blk.Entities {
-				renderEntity(r, be, layers, blocks, layerFilter, depth+1,
-					blk.BasePoint.X, blk.BasePoint.Y,
-					wx, wy, newScaleX, newScaleY, newRot)
+			for _, local := range insertInstances(e, blk.BasePoint) {
+				cctx := ctx.child(e, local, layers)
+				for _, be := range blk.Entities {
+					renderEntity(r, be, layers, blocks, layerFilter, cctx)
+				}
 			}
 		}
 		// ATTRIBs are stored in the INSERT's own coordinate space (already
 		// placed), so they take the parent transform, not the block's.
+		actx := ctx.child(e, identityAffine, layers)
 		for i := range e.Attributes {
-			renderEntity(r, &e.Attributes[i], layers, blocks, layerFilter, depth+1,
-				baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg)
+			renderEntity(r, &e.Attributes[i], layers, blocks, layerFilter, actx)
 		}
 
 	default:
@@ -730,17 +788,27 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		// the dimension entity itself already passed the filter above.
 		if dim, ok := ent.(dxf.Dimension); ok {
 			if blk, ok := blocks[dim.BlockName()]; ok {
+				dctx := ctx.child(ent, identityAffine, layers)
 				for _, be := range blk.Entities {
-					renderEntity(r, be, layers, blocks, nil, depth+1,
-						0, 0, 0, 0, 1, 1, 0)
+					renderEntity(r, be, layers, blocks, nil, dctx)
 				}
 			}
 		}
 	}
 }
 
-func renderMText(r *Renderer, e *dxf.MText, ai func(x, y float64) (float64, float64), insScaleY, insRotDeg float64) {
-	x, y := ai(e.InsertionPoint.X, e.InsertionPoint.Y)
+// renderTextLine draws a single-line TEXT/ATTRIB whose anchor is given in the
+// entity's own coordinates, mapped through m.
+func renderTextLine(r *Renderer, m affine, value string, height float64, a textAnchor) {
+	x, y, rot, hScale, mirrored := textFrame(m, a.X, a.Y, a.RotationDeg)
+	hAlign := a.HAlign
+	if mirrored {
+		hAlign = 1 - hAlign
+	}
+	r.DrawText(x, y, value, height*hScale, rot, hAlign, a.VAlign)
+}
+
+func renderMText(r *Renderer, e *dxf.MText, m affine) {
 	// Long MTEXT is split into 250-char group 3 chunks followed by the final
 	// group 1 chunk, so the extended text comes first.
 	var raw strings.Builder
@@ -749,83 +817,44 @@ func renderMText(r *Renderer, e *dxf.MText, ai func(x, y float64) (float64, floa
 	}
 	raw.WriteString(e.Text)
 	segments := ParseMText(raw.String())
-	r.DrawMText(x, y, segments, e.InitialTextHeight*math.Abs(insScaleY),
-		mtextRotationDeg(e)+insRotDeg, int(e.AttachmentPoint), e.LineSpacingFactor)
+
+	x, y, rot, hScale, mirrored := textFrame(m, e.InsertionPoint.X, e.InsertionPoint.Y, mtextRotationDeg(e))
+	attach := int(e.AttachmentPoint)
+	if mirrored && attach >= 1 && attach <= 9 {
+		row, col := (attach-1)/3, (attach-1)%3
+		attach = row*3 + (2 - col) + 1
+	}
+	r.DrawMText(x, y, segments, e.InitialTextHeight*hScale, rot, attach, e.LineSpacingFactor)
 }
 
-func renderLWPolyline(r *Renderer, e *dxf.LWPolyline, baseX, baseY, insX, insY, scX, scY, rotDeg float64) {
+// drawEdge draws a straight or bulged (arc) polyline edge given in local
+// coordinates, mapped through m.
+func drawEdge(r *Renderer, m affine, x1, y1, x2, y2, bulge float64) {
+	if math.Abs(bulge) > 1e-10 && (x1 != x2 || y1 != y2) {
+		lcx, lcy, radius, start, sweep := bulgeArc(x1, y1, x2, y2, bulge)
+		cx, cy, ux, uy, vx, vy := circleArcAxes(m, lcx, lcy, radius)
+		r.DrawEllipticArc(cx, cy, ux, uy, vx, vy, start, start+sweep)
+		return
+	}
+	wx1, wy1 := m.apply(x1, y1)
+	wx2, wy2 := m.apply(x2, y2)
+	r.DrawLine(wx1, wy1, wx2, wy2)
+}
+
+func renderLWPolyline(r *Renderer, e *dxf.LWPolyline, m affine) {
 	verts := e.Vertices
 	n := len(verts)
 	if n < 2 {
 		return
 	}
-
-	closed := e.IsClosed()
-	count := n
-	if closed {
+	count := n - 1
+	if e.IsClosed() {
 		count = n
 	}
-
 	for i := 0; i < count; i++ {
-		j := (i + 1) % n
-		if !closed && j == 0 && i != 0 {
-			break
-		}
-		x1, y1 := applyInsert(verts[i].X, verts[i].Y, baseX, baseY, insX, insY, scX, scY, rotDeg)
-		x2, y2 := applyInsert(verts[j].X, verts[j].Y, baseX, baseY, insX, insY, scX, scY, rotDeg)
-
-		if math.Abs(verts[i].Bulge) > 1e-10 {
-			bulge := verts[i].Bulge
-			// Mirroring (one negative scale) reverses arc direction
-			if scX*scY < 0 {
-				bulge = -bulge
-			}
-			r.DrawBulgeArc(x1, y1, x2, y2, bulge)
-		} else {
-			r.DrawLine(x1, y1, x2, y2)
-		}
+		a, b := verts[i], verts[(i+1)%n]
+		drawEdge(r, m, a.X, a.Y, b.X, b.Y, a.Bulge)
 	}
-}
-
-func renderPolyline(r *Renderer, e *dxf.Polyline, baseX, baseY, insX, insY, scX, scY, rotDeg float64) {
-	for _, edge := range polylineEdges(e) {
-		x1, y1 := applyInsert(edge.X1, edge.Y1, baseX, baseY, insX, insY, scX, scY, rotDeg)
-		x2, y2 := applyInsert(edge.X2, edge.Y2, baseX, baseY, insX, insY, scX, scY, rotDeg)
-		if math.Abs(edge.Bulge) > 1e-10 {
-			bulge := edge.Bulge
-			if scX*scY < 0 {
-				bulge = -bulge
-			}
-			r.DrawBulgeArc(x1, y1, x2, y2, bulge)
-		} else {
-			r.DrawLine(x1, y1, x2, y2)
-		}
-	}
-}
-
-func renderSpline(r *Renderer, e *dxf.Spline, baseX, baseY, insX, insY, scX, scY, rotDeg float64) {
-	cps := make([][2]float64, len(e.ControlPoints))
-	for i, cp := range e.ControlPoints {
-		x, y := applyInsert(cp.Point.X, cp.Point.Y, baseX, baseY, insX, insY, scX, scY, rotDeg)
-		cps[i] = [2]float64{x, y}
-	}
-	r.DrawSpline(cps, e.DegreeOfCurve, e.KnotValues)
-}
-
-// applyInsert transforms a point from block-local coordinates to world coordinates.
-// The transform is: (point - basePoint) * scale → rotate → + insertPoint.
-// baseX/baseY is the block's base point which must be subtracted before scaling,
-// since block entities may store coordinates in world space.
-func applyInsert(x, y, baseX, baseY, insX, insY, scX, scY, rotDeg float64) (float64, float64) {
-	x = (x - baseX) * scX
-	y = (y - baseY) * scY
-	if math.Abs(rotDeg) > 0.001 {
-		rad := rotDeg * math.Pi / 180
-		cos := math.Cos(rad)
-		sin := math.Sin(rad)
-		x, y = x*cos-y*sin, x*sin+y*cos
-	}
-	return x + insX, y + insY
 }
 
 
