@@ -89,8 +89,10 @@ func TestDashedStrokes(t *testing.T) {
 	// pattern runs on across the vertex.
 	for _, batch := range []bool{true, false} {
 		r := newRenderer(batch)
-		r.DrawLine(0, 50, 3, 50)
-		r.DrawLine(3, 50, 6, 50)
+		for i := 0; i < 600; i++ { // long polylines too
+			x := float64(i) / 10
+			r.DrawLine(x, 50, x+0.1, 50)
+		}
 		var p *canvas.Path = r.pending
 		if n := strings.Count(p.String(), "M"); n != 1 {
 			t.Errorf("batch=%v: polyline path %s has %d subpaths, want 1", batch, p, n)

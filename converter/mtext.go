@@ -33,6 +33,11 @@ type MTextSegment struct {
 	NewLine bool // true = start a new line before this segment
 }
 
+// mtextCharFixes maps run characters to what we draw: ^I tabs become spaces
+// (^J/^M arrive as newlines and become line breaks), and the diameter sign
+// becomes Ø, which (unlike ⌀) every Latin font has.
+var mtextCharFixes = strings.NewReplacer("\t", " ", "⌀", "Ø")
+
 // ParseMText parses MText content into styled segments, using the dxf
 // package's MTEXT run parser (formatting codes, grouping, stacks, special
 // characters).
@@ -67,8 +72,7 @@ func ParseMText(s string) []MTextSegment {
 			style.ColorR, style.ColorG, style.ColorB = int(rgb.R), int(rgb.G), int(rgb.B)
 			style.HasColor = true
 		}
-		// ^J/^M line breaks come through as newlines, ^I as a tab.
-		text := strings.NewReplacer("\t", " ", "⌀", "Ø").Replace(run.Text)
+		text := mtextCharFixes.Replace(run.Text)
 		for i, line := range strings.Split(text, "\n") {
 			if i > 0 {
 				segments = append(segments, MTextSegment{NewLine: true})

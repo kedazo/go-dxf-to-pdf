@@ -54,13 +54,18 @@ func (f *layerFilter) matchName(layer string) bool {
 	base := strings.ToLower(strings.TrimSpace(penSuffix.ReplaceAllString(layer, "")))
 	for _, p := range f.patterns {
 		for _, n := range []string{name, base} {
-			if n == p {
-				return true
-			}
-			if ok, err := path.Match(p, n); err == nil && ok {
+			if n == p || globMatch(p, n) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// globMatch is path.Match without the special meaning of '/', which is an
+// ordinary character in layer names.
+func globMatch(pattern, name string) bool {
+	slash := strings.NewReplacer("/", "\x00")
+	ok, err := path.Match(slash.Replace(pattern), slash.Replace(name))
+	return err == nil && ok
 }

@@ -15,6 +15,7 @@ func TestLayerFilterMatch(t *testing.T) {
 		"Walls2":                   false,
 		"Rajz és ábra _Pen_No__41": true, // trailing space before the suffix
 		"Méretezés - általános":    true, // glob
+		"Méret/Ext":                true, // '/' is an ordinary character
 		"Doors":                    false,
 	} {
 		if got := f.match(layer); got != want {

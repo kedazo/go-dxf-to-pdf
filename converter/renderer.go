@@ -58,10 +58,6 @@ func (r *Renderer) SetLeaderArrows(la *leaderArrows) {
 // maxPendingSegs bounds the size of one batched path.
 const maxPendingSegs = 20000
 
-// maxRasterChain bounds the connected segments (polyline edges, arc pieces)
-// collected for a continuous dash pattern when not batching.
-const maxRasterChain = 256
-
 // SetLineTypes sets the line types used to dash entities.
 func (r *Renderer) SetLineTypes(lt *lineTypes) {
 	r.lineTypes = lt
@@ -165,8 +161,9 @@ func (r *Renderer) penTo(x, y float64) {
 	switch {
 	case r.batch && r.pendingSegs >= maxPendingSegs:
 		r.flush()
-	case !r.batch && (!continues || r.dashes == nil || r.pendingSegs >= maxRasterChain):
-		// Without batching only dashed strokes chain up (for the pattern).
+	case !r.batch && (!continues || r.dashes == nil || r.pendingSegs >= maxPendingSegs):
+		// Without batching only dashed strokes chain up, for a continuous
+		// pattern; flush strokes their dashes one segment at a time.
 		r.flush()
 	case continues:
 		return
@@ -438,7 +435,9 @@ func (r *Renderer) drawTextLine(x, y float64, line *canvas.Text, sx, obliqueDeg 
 	// oblique angle leans them to the right.
 	shear := -math.Tan(obliqueDeg * math.Pi / 180)
 	r.ctx.Push()
-	r.ctx.ComposeView(canvas.Identity.Translate(x, y).Scale(sx, 1).Shear(shear, 0).Translate(-x, -y))
+	// Shear after scaling (matrices apply right to left), so the width
+	// factor doesn't change the slant angle.
+	r.ctx.ComposeView(canvas.Identity.Translate(x, y).Shear(shear, 0).Scale(sx, 1).Translate(-x, -y))
 	r.ctx.DrawText(x, y, line)
 	r.ctx.Pop()
 }
