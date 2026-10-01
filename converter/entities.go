@@ -26,6 +26,7 @@ type MTextStyle struct {
 	ColorR    int
 	ColorG    int
 	ColorB    int
+	HasColor  bool // true once \C or \c set an explicit color (otherwise the entity color applies)
 	Underline bool
 	Overstrike bool
 	Strikethrough bool
@@ -181,11 +182,15 @@ func ParseMText(s string) []MTextSegment {
 				flush(false)
 				i += 2
 				val := readToSemicolon(s, &i)
-				if idx, err := parseInt(val); err == nil {
+				// \C0; (ByBlock) and \C256; (ByLayer) mean "back to the entity color".
+				if idx, err := parseInt(val); err == nil && idx > 0 && idx < 256 {
 					rgb := ACIToRGB(int16(idx))
 					style.ColorR = int(rgb.R)
 					style.ColorG = int(rgb.G)
 					style.ColorB = int(rgb.B)
+					style.HasColor = true
+				} else if err == nil {
+					style.HasColor = false
 				}
 				continue
 
@@ -197,6 +202,7 @@ func ParseMText(s string) []MTextSegment {
 					style.ColorR = (c >> 16) & 0xFF
 					style.ColorG = (c >> 8) & 0xFF
 					style.ColorB = c & 0xFF
+					style.HasColor = true
 				}
 				continue
 
@@ -289,6 +295,13 @@ func ParseMText(s string) []MTextSegment {
 				buf.WriteByte(' ')
 				i += 2
 				continue
+
+			case 'U': // Unicode escape: \U+00E1
+				if r, n := parseUnicodeEscape(s[i:]); n > 0 {
+					buf.WriteRune(r)
+					i += n
+					continue
+				}
 
 			case '\\': // Literal backslash
 				buf.WriteByte('\\')
@@ -492,9 +505,13 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 			bb.Expand(x, y)
 		}
 	case *dxf.Polyline:
-		for _, v := range e.Vertices {
-			x, y := wx(v.Location.X, v.Location.Y)
-			bb.Expand(x, y)
+		// Use the edges, not the raw vertices: polyface face records sit at
+		// (0,0,0) and would drag the bbox to the origin.
+		for _, edge := range polylineEdges(e) {
+			x1, y1 := wx(edge.X1, edge.Y1)
+			x2, y2 := wx(edge.X2, edge.Y2)
+			bb.Expand(x1, y1)
+			bb.Expand(x2, y2)
 		}
 	case *dxf.Spline:
 		for _, cp := range e.ControlPoints {
@@ -536,6 +553,15 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 					blk.BasePoint.X, blk.BasePoint.Y,
 					wx, wy, newScaleX, newScaleY, newRot)
 			}
+		}
+		for i := range e.Attributes {
+			expandBBoxForEntity(bb, &e.Attributes[i], blocks, depth+1,
+				baseX, baseY, insX, insY, scX, scY, rotDeg)
+		}
+	case *dxf.Attribute:
+		if !e.IsInvisible() {
+			x, y := wx(e.Location.X, e.Location.Y)
+			bb.Expand(x, y)
 		}
 
 	default:
@@ -630,17 +656,28 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		renderSpline(r, e, baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg)
 
 	case *dxf.Text:
-		x, y := ai(e.Location.X, e.Location.Y)
-		r.DrawText(x, y, e.Value, e.Height*math.Abs(insScaleY), e.Rotation+insRotDeg)
+		a := resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
+			e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation)
+		x, y := ai(a.X, a.Y)
+		r.DrawText(x, y, decodeTextValue(e.Value), e.Height*math.Abs(insScaleY),
+			a.RotationDeg+insRotDeg, a.HAlign, a.VAlign)
+
+	case *dxf.Attribute:
+		if e.IsInvisible() {
+			return
+		}
+		if e.MTextFlag&dxf.MTextFlagMultilineAttribute != 0 && e.MText.Text != "" {
+			renderMText(r, &e.MText, ai, insScaleY, insRotDeg)
+			return
+		}
+		a := resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
+			e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation)
+		x, y := ai(a.X, a.Y)
+		r.DrawText(x, y, decodeTextValue(e.Value), e.TextHeight*math.Abs(insScaleY),
+			a.RotationDeg+insRotDeg, a.HAlign, a.VAlign)
 
 	case *dxf.MText:
-		x, y := ai(e.InsertionPoint.X, e.InsertionPoint.Y)
-		raw := e.Text
-		for _, ext := range e.ExtendedText {
-			raw += ext
-		}
-		segments := ParseMText(raw)
-		r.DrawMText(x, y, segments, e.InitialTextHeight*math.Abs(insScaleY), e.RotationAngle*180/math.Pi+insRotDeg)
+		renderMText(r, e, ai, insScaleY, insRotDeg)
 
 	case *dxf.ModelPoint:
 		x, y := ai(e.Location.X, e.Location.Y)
@@ -679,6 +716,12 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 					wx, wy, newScaleX, newScaleY, newRot)
 			}
 		}
+		// ATTRIBs are stored in the INSERT's own coordinate space (already
+		// placed), so they take the parent transform, not the block's.
+		for i := range e.Attributes {
+			renderEntity(r, &e.Attributes[i], layers, blocks, layerFilter, depth+1,
+				baseX, baseY, insX, insY, insScaleX, insScaleY, insRotDeg)
+		}
 
 	default:
 		// DIMENSION entities reference an anonymous block containing their geometry.
@@ -694,6 +737,20 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 			}
 		}
 	}
+}
+
+func renderMText(r *Renderer, e *dxf.MText, ai func(x, y float64) (float64, float64), insScaleY, insRotDeg float64) {
+	x, y := ai(e.InsertionPoint.X, e.InsertionPoint.Y)
+	// Long MTEXT is split into 250-char group 3 chunks followed by the final
+	// group 1 chunk, so the extended text comes first.
+	var raw strings.Builder
+	for _, ext := range e.ExtendedText {
+		raw.WriteString(ext)
+	}
+	raw.WriteString(e.Text)
+	segments := ParseMText(raw.String())
+	r.DrawMText(x, y, segments, e.InitialTextHeight*math.Abs(insScaleY),
+		mtextRotationDeg(e)+insRotDeg, int(e.AttachmentPoint), e.LineSpacingFactor)
 }
 
 func renderLWPolyline(r *Renderer, e *dxf.LWPolyline, baseX, baseY, insX, insY, scX, scY, rotDeg float64) {
@@ -731,15 +788,11 @@ func renderLWPolyline(r *Renderer, e *dxf.LWPolyline, baseX, baseY, insX, insY, 
 }
 
 func renderPolyline(r *Renderer, e *dxf.Polyline, baseX, baseY, insX, insY, scX, scY, rotDeg float64) {
-	verts := e.Vertices
-	if len(verts) < 2 {
-		return
-	}
-	for i := 1; i < len(verts); i++ {
-		x1, y1 := applyInsert(verts[i-1].Location.X, verts[i-1].Location.Y, baseX, baseY, insX, insY, scX, scY, rotDeg)
-		x2, y2 := applyInsert(verts[i].Location.X, verts[i].Location.Y, baseX, baseY, insX, insY, scX, scY, rotDeg)
-		if math.Abs(verts[i-1].Bulge) > 1e-10 {
-			bulge := verts[i-1].Bulge
+	for _, edge := range polylineEdges(e) {
+		x1, y1 := applyInsert(edge.X1, edge.Y1, baseX, baseY, insX, insY, scX, scY, rotDeg)
+		x2, y2 := applyInsert(edge.X2, edge.Y2, baseX, baseY, insX, insY, scX, scY, rotDeg)
+		if math.Abs(edge.Bulge) > 1e-10 {
+			bulge := edge.Bulge
 			if scX*scY < 0 {
 				bulge = -bulge
 			}

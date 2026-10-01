@@ -25,6 +25,8 @@ type Renderer struct {
 	fontFamily *canvas.FontFamily
 	pageW      float64
 	pageH      float64
+	color      color.RGBA // current entity color (used for text)
+	capRatio   float64    // font cap height / em size, measured lazily
 }
 
 // DefaultFontDir returns the default font directory.
@@ -76,6 +78,7 @@ func (r *Renderer) SetTransform(t Transform) {
 
 func (r *Renderer) SetStyle(col RGB, lineWidthMM float64) {
 	rgba := color.RGBA{col.R, col.G, col.B, 255}
+	r.color = rgba
 	r.ctx.SetStrokeColor(rgba)
 	r.ctx.SetStrokeWidth(lineWidthMM)
 	r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0}) // transparent fill by default
@@ -265,50 +268,100 @@ func (r *Renderer) DrawPoint(x, y float64) {
 	r.ctx.Pop()
 }
 
-func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg float64) {
-	px := r.transform.X(x)
-	py := r.transform.Y(y)
-	scaledH := r.transform.Dist(heightMM)
+// textVAlign is the vertical anchor of a text line relative to its insertion
+// point (DXF TEXT vertical justification).
+type textVAlign int
 
-	if scaledH < 0.5 {
-		scaledH = 0.5
+const (
+	vAlignBaseline textVAlign = iota
+	vAlignBottom
+	vAlignMiddle
+	vAlignTop
+)
+
+// minTextHeightMM keeps tiny annotation text legible on paper.
+const minTextHeightMM = 0.5
+
+// textFace returns a font face whose cap height is heightMM. CAD text height
+// is the height of capital letters, not the em size.
+func (r *Renderer) textFace(heightMM float64, col color.RGBA, style canvas.FontStyle) *canvas.FontFace {
+	if r.capRatio == 0 {
+		ref := r.fontFamily.Face(100, canvas.Black, canvas.FontRegular, canvas.FontNormal)
+		r.capRatio = 0.729 // DejaVu Sans fallback
+		if m := ref.Metrics(); m.CapHeight > 0 && m.LineHeight > 0 {
+			r.capRatio = m.CapHeight / (100 / 2.83465)
+		}
 	}
+	ptSize := heightMM / r.capRatio * 2.83465 // mm to points
+	return r.fontFamily.Face(ptSize, col, style, canvas.FontNormal)
+}
 
-	ptSize := scaledH * 2.83465 // mm to points
-	face := r.fontFamily.Face(ptSize, canvas.Black, canvas.FontRegular, canvas.FontNormal)
-	textLine := canvas.NewTextLine(face, text, canvas.Left)
-
-	if math.Abs(rotationDeg) > 0.01 {
-		r.ctx.Push()
-		r.ctx.ComposeView(canvas.Identity.RotateAbout(rotationDeg, px, py))
-		r.ctx.DrawText(px, py, textLine)
-		r.ctx.Pop()
-	} else {
-		r.ctx.DrawText(px, py, textLine)
+// baselineShift returns how far (in page mm, Y-down) the baseline sits below
+// the anchor point for the given vertical alignment.
+func baselineShift(capHeight, descent float64, v textVAlign) float64 {
+	switch v {
+	case vAlignBottom:
+		return -descent
+	case vAlignMiddle:
+		return capHeight / 2
+	case vAlignTop:
+		return capHeight
+	default:
+		return 0
 	}
 }
 
-func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64) {
+// DrawText draws a single-line text. hAlign is 0 (left), 0.5 (center) or 1
+// (right) of the text width; vAlign selects the vertical anchor.
+func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hAlign float64, vAlign textVAlign) {
+	if text == "" {
+		return
+	}
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
-	defaultScaledH := r.transform.Dist(defaultHeightMM)
-	if defaultScaledH < 0.5 {
-		defaultScaledH = 0.5
-	}
+	scaledH := max(r.transform.Dist(heightMM), minTextHeightMM)
+
+	face := r.textFace(scaledH, r.color, canvas.FontRegular)
+	textLine := canvas.NewTextLine(face, text, canvas.Left)
+	dx := -hAlign * textLine.Bounds().W()
+	dy := baselineShift(scaledH, face.Metrics().Descent, vAlign)
 
 	if math.Abs(rotationDeg) > 0.01 {
 		r.ctx.Push()
-		r.ctx.ComposeView(canvas.Identity.RotateAbout(rotationDeg, px, py))
+		// DXF angles are CCW in a Y-up world; the page is Y-down, so negate.
+		r.ctx.ComposeView(canvas.Identity.RotateAbout(-rotationDeg, px, py))
+		r.ctx.DrawText(px+dx, py+dy, textLine)
+		r.ctx.Pop()
+	} else {
+		r.ctx.DrawText(px+dx, py+dy, textLine)
+	}
+}
+
+// mtextItem is one laid-out MText segment.
+type mtextItem struct {
+	seg   MTextSegment
+	line  *canvas.Text
+	width float64
+	h     float64 // cap height in page mm
+	col   color.RGBA
+}
+
+// DrawMText draws multi-line formatted text. attach is the DXF attachment
+// point (1..9: top/middle/bottom × left/center/right); lineSpacing is the
+// MTEXT line spacing factor (0 = default 1.0).
+func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing float64) {
+	px := r.transform.X(x)
+	py := r.transform.Y(y)
+	defaultScaledH := max(r.transform.Dist(defaultHeightMM), minTextHeightMM)
+	if lineSpacing <= 0 {
+		lineSpacing = 1
 	}
 
-	curX := px
-	curY := py
-	lineHeight := defaultScaledH * 1.4
-
+	// Pass 1: lay out segments into lines and measure them.
+	lines := [][]mtextItem{nil}
 	for _, seg := range segments {
 		if seg.NewLine {
-			curX = px
-			curY += lineHeight
+			lines = append(lines, nil)
 			continue
 		}
 		if seg.Text == "" {
@@ -321,9 +374,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		} else if seg.Style.Height > 0 {
 			scaledH = r.transform.Dist(seg.Style.Height)
 		}
-		if scaledH < 0.5 {
-			scaledH = 0.5
-		}
+		scaledH = max(scaledH, minTextHeightMM)
 
 		var fontStyle canvas.FontStyle
 		if seg.Style.Bold && seg.Style.Italic {
@@ -336,53 +387,75 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			fontStyle = canvas.FontRegular
 		}
 
-		ptSize := scaledH * 2.83465
-		textColor := color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
-		face := r.fontFamily.Face(ptSize, textColor, fontStyle, canvas.FontNormal)
+		textColor := r.color
+		if seg.Style.HasColor {
+			textColor = color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
+		}
+		face := r.textFace(scaledH, textColor, fontStyle)
 		textLine := canvas.NewTextLine(face, seg.Text, canvas.Left)
+		last := len(lines) - 1
+		lines[last] = append(lines[last], mtextItem{
+			seg: seg, line: textLine, width: textLine.Bounds().W(), h: scaledH, col: textColor,
+		})
+	}
 
-		r.ctx.DrawText(curX, curY, textLine)
+	// Pass 2: anchor the block according to the attachment point. AutoCAD's
+	// default line pitch is 5/3 of the text height.
+	if attach < 1 || attach > 9 {
+		attach = 1
+	}
+	hAlign := float64((attach-1)%3) / 2
+	advance := defaultScaledH * 5.0 / 3.0 * lineSpacing
+	n := float64(len(lines))
+	var firstBaseline float64
+	switch (attach - 1) / 3 {
+	case 0: // top
+		firstBaseline = py + defaultScaledH
+	case 1: // middle
+		total := defaultScaledH + (n-1)*advance
+		firstBaseline = py - total/2 + defaultScaledH
+	default: // bottom
+		firstBaseline = py - (n-1)*advance
+	}
 
-		// Underline
-		if seg.Style.Underline {
-			textW := textLine.Bounds().W()
-			lineColor := color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
-			r.ctx.Push()
-			r.ctx.SetStrokeColor(lineColor)
-			r.ctx.SetStrokeWidth(scaledH * 0.05)
-			r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
-			underY := curY + scaledH*0.15
-			r.drawLine(curX, underY, curX+textW, underY)
-			r.ctx.Pop()
+	if math.Abs(rotationDeg) > 0.01 {
+		r.ctx.Push()
+		r.ctx.ComposeView(canvas.Identity.RotateAbout(-rotationDeg, px, py))
+	}
+
+	for li, items := range lines {
+		lineW := 0.0
+		for _, it := range items {
+			lineW += it.width
 		}
+		curX := px - hAlign*lineW
+		curY := firstBaseline + float64(li)*advance
 
-		// Strikethrough
-		if seg.Style.Strikethrough {
-			textW := textLine.Bounds().W()
-			lineColor := color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
-			r.ctx.Push()
-			r.ctx.SetStrokeColor(lineColor)
-			r.ctx.SetStrokeWidth(scaledH * 0.05)
-			r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
-			strikeY := curY - scaledH*0.25
-			r.drawLine(curX, strikeY, curX+textW, strikeY)
-			r.ctx.Pop()
+		for _, it := range items {
+			r.ctx.DrawText(curX, curY, it.line)
+
+			// Underline / strikethrough / overstrike decorations
+			for _, deco := range []struct {
+				on bool
+				dy float64
+			}{
+				{it.seg.Style.Underline, it.h * 0.2},
+				{it.seg.Style.Strikethrough, -it.h * 0.35},
+				{it.seg.Style.Overstrike, -it.h * 1.15},
+			} {
+				if !deco.on {
+					continue
+				}
+				r.ctx.Push()
+				r.ctx.SetStrokeColor(it.col)
+				r.ctx.SetStrokeWidth(it.h * 0.07)
+				r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
+				r.drawLine(curX, curY+deco.dy, curX+it.width, curY+deco.dy)
+				r.ctx.Pop()
+			}
+
+			curX += it.width
 		}
-
-		// Overstrike
-		if seg.Style.Overstrike {
-			textW := textLine.Bounds().W()
-			lineColor := color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
-			r.ctx.Push()
-			r.ctx.SetStrokeColor(lineColor)
-			r.ctx.SetStrokeWidth(scaledH * 0.05)
-			r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
-			overY := curY - scaledH*0.7
-			r.drawLine(curX, overY, curX+textW, overY)
-			r.ctx.Pop()
-		}
-
-		curX += textLine.Bounds().W()
 	}
 
 	if math.Abs(rotationDeg) > 0.01 {

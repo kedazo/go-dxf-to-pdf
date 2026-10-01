@@ -483,14 +483,10 @@ func collectSegments(out *[]rawSeg, ent dxf.Entity, layers map[string]dxf.Layer,
 		}
 
 	case *dxf.Polyline:
-		verts := e.Vertices
-		if len(verts) < 2 {
-			return
-		}
-		for i := 1; i < len(verts); i++ {
-			x1, y1 := ai(verts[i-1].Location.X, verts[i-1].Location.Y)
-			x2, y2 := ai(verts[i].Location.X, verts[i].Location.Y)
-			add(x1, y1, x2, y2, "POLYLINE", math.Abs(verts[i-1].Bulge) > 1e-10)
+		for _, edge := range polylineEdges(e) {
+			x1, y1 := ai(edge.X1, edge.Y1)
+			x2, y2 := ai(edge.X2, edge.Y2)
+			add(x1, y1, x2, y2, "POLYLINE", math.Abs(edge.Bulge) > 1e-10)
 		}
 
 	case *dxf.Arc:
