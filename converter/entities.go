@@ -409,6 +409,13 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		for _, v := range e.Vertices {
 			expand(m, v.X, v.Y)
 		}
+	case *dxf.MLine:
+		lines, _ := mlineElements(e)
+		for _, line := range lines {
+			for _, p := range line {
+				expand(m, p.X, p.Y)
+			}
+		}
 	case *dxf.AttributeDefinition:
 		if text, ok := attdefText(e, ctx.depth > 0); ok {
 			if e.IsMultiline() && ctx.depth > 0 && e.MText.Text != "" {
@@ -618,6 +625,9 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		r.SetStyle(rgb, 0)
 		r.SetFillColor(rgb)
 		r.DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4)
+
+	case *dxf.MLine:
+		renderMLine(r, e, m)
 
 	case *dxf.Mesh: // its edges, seen from above
 		for _, edge := range meshEdges(e) {
