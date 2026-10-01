@@ -62,6 +62,8 @@ github.com/kedazo/dxf-go v0.2.3-0.20261001100029-f310d4850dc9 h1:8HJ05lAMkLi2MKY
 github.com/kedazo/dxf-go v0.2.3-0.20261001100029-f310d4850dc9/go.mod h1:QFV/1tG5BMLRKoJffEuyuW3llS6kTaOKuYigh+ky0F0=
 github.com/kedazo/dxf-go v0.2.3-0.20261001101338-11d830381e5d h1:FZFDyeyVsjdzAv/asz9fqybP4Cm//QXH/yK6Q/sjGZ4=
 github.com/kedazo/dxf-go v0.2.3-0.20261001101338-11d830381e5d/go.mod h1:QFV/1tG5BMLRKoJffEuyuW3llS6kTaOKuYigh+ky0F0=
+github.com/kedazo/dxf-go v0.2.3-0.20261001102911-037bf4718c89 h1:dcFk33Bw+7eE/t2YxQEtOVMoFX5nNBajx97UQrZx2u4=
+github.com/kedazo/dxf-go v0.2.3-0.20261001102911-037bf4718c89/go.mod h1:QFV/1tG5BMLRKoJffEuyuW3llS6kTaOKuYigh+ky0F0=
 github.com/kolesa-team/go-webp v1.0.5 h1:GZQHJBaE8dsNKZltfwqsL0qVJ7vqHXsfA+4AHrQW3pE=
 github.com/kolesa-team/go-webp v1.0.5/go.mod h1:QmJu0YHXT3ex+4SgUvs+a+1SFCDcCqyZg+LbIuNNTnE=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
