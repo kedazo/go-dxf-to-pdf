@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -73,10 +74,14 @@ func ConvertDWGtoDXF(dwgPath, dwg2dxfPath string, minimal bool) (string, error) 
 		args = append(args, "-m")
 	}
 	args = append(args, "-y", "-o", dxfPath, dwgPath)
+	// dwg2dxf reports every object it only partly understands; show that
+	// only when the conversion fails.
+	var stderr bytes.Buffer
 	cmd := exec.Command(dwg2dxfPath, args...)
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		os.Remove(dxfPath)
+		os.Stderr.Write(stderr.Bytes())
 		return "", fmt.Errorf("dwg2dxf failed: %w", err)
 	}
 

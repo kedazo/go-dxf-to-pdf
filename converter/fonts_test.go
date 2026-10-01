@@ -66,6 +66,11 @@ func TestFontSubstitution(t *testing.T) {
 		t.Errorf("exact file = %s ×%v", fs.files[0], fs.widthComp)
 	}
 
+	// Siblings of a font file supply bold and italic.
+	if fs := lib.font("DejaVuSans.ttf"); filepath.Base(fs.files[1]) != "DejaVuSans-Bold.ttf" || filepath.Base(fs.files[2]) != "DejaVuSans-Oblique.ttf" {
+		t.Errorf("font file siblings = %v", fs.files)
+	}
+
 	// Nothing available: the regular DejaVu path, so the load error shows it.
 	if fs := testFontLib(t, t.TempDir()).font("ARIALN.TTF"); filepath.Base(fs.files[0]) != "DejaVuSans.ttf" {
 		t.Errorf("no fonts = %s", fs.files[0])

@@ -265,10 +265,11 @@ type pairWall struct {
 func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*WallSegmentsResult, error) {
 	opts.applyDefaults()
 
-	drawing, err := loadDrawing(inputPath, opts.Dwg2Dxf)
+	drawing, _, err := loadDrawing(inputPath, opts.Dwg2Dxf)
 	if err != nil {
 		return nil, err
 	}
+	entities := modelSpace(drawing.Entities)
 
 	// Layer / block lookups and optional restrict filter — identical to convertDrawing.
 	layerMap := make(map[string]dxf.Layer)
@@ -309,15 +310,15 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 	}
 
 	// Same bbox the PNG uses — this is what makes the scene coords PNG-aligned.
-	bbox := selectionBBox(drawing.Entities, blockMap, sel)
+	bbox := plottedBBox(entities, blockMap, sel, layerMap)
 	if bbox.Width() <= 0 || bbox.Height() <= 0 {
 		return nil, fmt.Errorf("empty drawing or no renderable entities")
 	}
 
 	// Collect raw segments in DXF world coordinates (identity insert transform).
 	var raws []rawSeg
-	ctx := filtered(sel)
-	for _, ent := range drawing.Entities {
+	ctx := plotted(sel, layerMap)
+	for _, ent := range entities {
 		collectSegments(&raws, ent, layerMap, blockMap, opts, ctx)
 	}
 
@@ -430,7 +431,7 @@ func thicknessClusters(walls []XMLWall, n int) []ThicknessBin {
 func collectSegments(out *[]rawSeg, ent dxf.Entity, layers map[string]dxf.Layer,
 	blocks map[string]*dxf.Block, opts WallSegmentsOptions, ctx drawCtx) {
 
-	if ctx.depth > maxBlockDepth || !ent.IsVisible() {
+	if ctx.depth > maxBlockDepth || !ent.IsVisible() || ctx.hidden(ent) {
 		return
 	}
 	if _, isInsert := ent.(*dxf.Insert); !isInsert && !ctx.keeps(ent) {

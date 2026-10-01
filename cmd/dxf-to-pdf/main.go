@@ -14,7 +14,8 @@ import (
 type CLI struct {
 	Input       string   `arg:"" help:"Input DXF or DWG file path."`
 	Output      string   `arg:"" optional:"" help:"Output file path (not needed with --info or --list-layers)."`
-	Scale       string   `optional:"" help:"Scale ratio (e.g. 1:100, 1:50, 1:1). Required for conversion."`
+	Scale       string   `optional:"" help:"Scale ratio (e.g. 1:100, 1:50, 1:1). Required for model space output; layouts are plotted 1:1 on their own sheet."`
+	Layout      string   `optional:"" help:"Paper space layout to plot (name, see --info), or 'model'. Default: the layout the drawing was saved on, if it has viewports, else model space."`
 	Paper       string   `default:"A4" help:"Paper size: A0-A4 or WxH in mm (e.g. 400x300)."`
 	Margin      float64  `default:"10" help:"Margin in mm (uniform on all sides)."`
 	Align       string   `default:"center" enum:"center,bottom-left,top-left" help:"Drawing alignment on page."`
@@ -86,6 +87,44 @@ func main() {
 			fmt.Printf("\nLayers:\n")
 			for _, l := range info.Layers {
 				fmt.Printf("  %-30s %s%s\n", l.Name, layerCounts(l), layerNotes(l))
+			}
+		}
+
+		if len(info.Layouts) > 0 {
+			fmt.Printf("\nLayouts:\n")
+			for _, l := range info.Layouts {
+				active := ""
+				if l.Active {
+					active = "  (active, plotted by default)"
+				}
+				fmt.Printf("  %-30s %.0f x %.0f mm, %d viewport(s)%s\n", l.Name, l.Width, l.Height, len(l.Viewports), active)
+				for _, v := range l.Viewports {
+					var notes []string
+					if v.Scale > 0 {
+						notes = append(notes, fmt.Sprintf("%.4g paper units per model unit", v.Scale))
+					}
+					if v.TwistDeg != 0 {
+						notes = append(notes, fmt.Sprintf("turned %.2f°", v.TwistDeg))
+					}
+					if v.Clipped {
+						notes = append(notes, "clipped to an outline")
+					}
+					if v.FrozenLayers > 0 {
+						notes = append(notes, fmt.Sprintf("%d layer(s) frozen", v.FrozenLayers))
+					}
+					fmt.Printf("    viewport: %s\n", strings.Join(notes, ", "))
+				}
+			}
+		}
+
+		if len(info.Xrefs) > 0 {
+			fmt.Printf("\nExternal references:\n")
+			for _, x := range info.Xrefs {
+				state := "→ " + x.Path
+				if x.Error != "" {
+					state = "NOT SHOWN: " + x.Error
+				}
+				fmt.Printf("  %s (%s) %s\n", x.Name, x.Ref, state)
 			}
 		}
 
@@ -189,10 +228,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: output file path is required for conversion\n")
 		os.Exit(1)
 	}
-	if cli.Scale == "" {
-		fmt.Fprintf(os.Stderr, "error: --scale is required for conversion\n")
-		os.Exit(1)
-	}
 
 	result, err := converter.Convert(cli.Input, cli.Output, converter.Options{
 		Scale:       cli.Scale,
@@ -209,6 +244,7 @@ func main() {
 		Format:      cli.Format,
 		DPI:         cli.DPI,
 		Transparent: cli.Transparent,
+		Layout:      cli.Layout,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

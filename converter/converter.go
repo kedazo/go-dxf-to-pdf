@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -27,6 +28,7 @@ type Options struct {
 	Format      string  // output format: "pdf", "png", "jpg" (default: auto from extension)
 	DPI         float64 // raster output DPI (default: 300)
 	Transparent bool    // transparent PNG background (default: false)
+	Layout      string  // paper space layout to plot; "model" = model space; "" = the layout the drawing was saved on, if any
 }
 
 type Result struct {
@@ -57,8 +59,10 @@ type TextStyleInfo struct {
 type DrawingInfo struct {
 	Units       string
 	UnitFactor  float64
-	BoundingBox BBox
+	BoundingBox BBox // of model space
 	Layers      []LayerInfo
+	Layouts     []LayoutInfo // paper space layouts
+	Xrefs       []XrefInfo   // external references
 	Blocks      []string
 	EntityCount int
 	LineTypes   []string       // non-continuous line types used by entities or layers
@@ -69,7 +73,7 @@ type DrawingInfo struct {
 
 // Inspect reads a DXF/DWG file and returns metadata without converting.
 func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
-	drawing, err := loadDrawing(inputPath, dwg2dxf)
+	drawing, files, err := loadDrawing(inputPath, dwg2dxf)
 	if err != nil {
 		return nil, err
 	}
@@ -189,9 +193,11 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 		}
 	}
 
-	bbox := ComputeBoundingBox(drawing.Entities, blockMap)
+	bbox := ComputeBoundingBox(modelSpace(drawing.Entities), blockMap)
 
 	return &DrawingInfo{
+		Xrefs:       files.xrefs,
+		Layouts:     layoutInfos(drawing),
 		Units:       UnitsName(drawing.Header.DefaultDrawingUnits),
 		UnitFactor:  UnitsToMM(drawing.Header.DefaultDrawingUnits),
 		BoundingBox: bbox,
@@ -205,8 +211,37 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 	}, nil
 }
 
-// loadDrawing handles DWG conversion and DXF parsing.
-func loadDrawing(inputPath string, dwg2dxfBin string) (*dxf.Drawing, error) {
+// loadDrawing handles DWG conversion and DXF parsing, and binds the external
+// references.
+func loadDrawing(inputPath string, dwg2dxfBin string) (*dxf.Drawing, *drawingFiles, error) {
+	abs, _ := filepath.Abs(inputPath)
+	files := &drawingFiles{images: map[*dxf.Image]string{}}
+	drawing, xrefs, err := loadDrawingDepth(inputPath, dwg2dxfBin, 0, map[string]bool{abs: true}, files)
+	files.xrefs = xrefs
+	return drawing, files, err
+}
+
+// drawingFiles are the files a drawing refers to.
+type drawingFiles struct {
+	xrefs  []XrefInfo
+	images map[*dxf.Image]string // image file of each IMAGE ("" = not found)
+}
+
+// loadDrawingDepth is loadDrawing for a drawing referenced depth levels deep.
+func loadDrawingDepth(inputPath, dwg2dxfBin string, depth int, seen map[string]bool, files *drawingFiles) (*dxf.Drawing, []XrefInfo, error) {
+	drawing, err := readDrawing(inputPath, dwg2dxfBin)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Images refer to their definitions by handle, which binding into
+	// another drawing breaks: resolve the files first.
+	findImages(drawing, inputPath, files.images)
+	xrefs := bindXrefs(drawing, inputPath, dwg2dxfBin, depth, seen, files)
+	return drawing, xrefs, nil
+}
+
+// readDrawing reads a DXF, or a DWG through dwg2dxf.
+func readDrawing(inputPath string, dwg2dxfBin string) (*dxf.Drawing, error) {
 	if !IsDWG(inputPath) {
 		drawing, err := readDxfFile(inputPath)
 		if err != nil {
@@ -250,11 +285,11 @@ func loadDrawing(inputPath string, dwg2dxfBin string) (*dxf.Drawing, error) {
 
 // Convert converts a DXF or DWG file to PDF, PNG, or JPG.
 func Convert(inputPath, outputPath string, opts Options) (*Result, error) {
-	drawing, err := loadDrawing(inputPath, opts.Dwg2Dxf)
+	drawing, files, err := loadDrawing(inputPath, opts.Dwg2Dxf)
 	if err != nil {
 		return nil, err
 	}
-	return convertDrawing(drawing, outputPath, opts)
+	return convertDrawing(drawing, outputPath, opts, files.images)
 }
 
 // ConvertReader converts a DXF from a reader to a PDF writer.
@@ -276,7 +311,7 @@ func ConvertReader(r io.Reader, pdfPath string, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading DXF: %w", err)
 	}
-	return convertDrawing(&drawing, pdfPath, opts)
+	return convertDrawing(&drawing, pdfPath, opts, nil) // no file location: no external references or images
 }
 
 // readDxfFile reads a DXF file, streaming it through the parser. Text
@@ -299,20 +334,7 @@ func readDxfFile(path string) (dxf.Drawing, error) {
 	return dxf.ReadFile(path)
 }
 
-func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result, error) {
-	scale, err := ParseScale(opts.Scale)
-	if err != nil {
-		return nil, err
-	}
-
-	// Auto-paper computes the paper size, so an empty Paper is fine there.
-	var paper PaperSize
-	if !opts.AutoPaper || opts.Paper != "" {
-		if paper, err = ParsePaperSize(opts.Paper); err != nil {
-			return nil, err
-		}
-	}
-
+func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options, images map[*dxf.Image]string) (*Result, error) {
 	margin := opts.Margin
 	if margin < 0 {
 		margin = 10
@@ -325,15 +347,6 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		format = formatFromExtension(pdfPath)
 	}
 	isPDF := format == "pdf"
-
-	// Detect drawing units and compute the unit-to-mm factor
-	unitFactor := UnitsToMM(drawing.Header.DefaultDrawingUnits)
-	unitName := UnitsName(drawing.Header.DefaultDrawingUnits)
-
-	// The effective scale converts DXF units to mm on paper:
-	// effectiveScale = (unitFactor * scale)
-	// e.g. meters + 1:100 → 1000 * 0.01 = 10 mm per DXF unit
-	effectiveScale := unitFactor * scale
 
 	// Build layer lookup
 	layerMap := make(map[string]dxf.Layer)
@@ -357,11 +370,52 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		r.SetLineTypes(lineTypes)
 		r.SetTextStyles(drawing.Styles)
 		r.SetLeaderArrows(leaderArrows)
+		r.SetImageFiles(images)
+		if !isPDF {
+			r.SetMinStrokeWidth(25.4 / rasterDPI(opts.DPI)) // one pixel
+		}
 		return r
 	}
 
+	// A paper space layout is plotted 1:1 on its own sheet.
+	layout, err := chooseLayout(drawing, opts.Layout, opts.Scale != "" || opts.AutoPaper || opts.Tile || opts.Crop != "")
+	if err != nil {
+		return nil, err
+	}
+	if layout != nil {
+		return convertLayout(drawing, layout, pdfPath, opts, newRenderer, layerMap, blockMap, sel)
+	}
+
+	if opts.Scale == "" {
+		return nil, fmt.Errorf("a scale is required for model space output (layouts carry their own)")
+	}
+	scale, err := ParseScale(opts.Scale)
+	if err != nil {
+		return nil, err
+	}
+
+	// Auto-paper computes the paper size, so an empty Paper is fine there.
+	var paper PaperSize
+	if !opts.AutoPaper || opts.Paper != "" {
+		if paper, err = ParsePaperSize(opts.Paper); err != nil {
+			return nil, err
+		}
+	}
+
+	// Detect drawing units and compute the unit-to-mm factor
+	unitFactor := UnitsToMM(drawing.Header.DefaultDrawingUnits)
+	unitName := UnitsName(drawing.Header.DefaultDrawingUnits)
+
+	// The effective scale converts DXF units to mm on paper:
+	// effectiveScale = (unitFactor * scale)
+	// e.g. meters + 1:100 → 1000 * 0.01 = 10 mm per DXF unit
+	effectiveScale := unitFactor * scale
+
+	// Model space only: paper space belongs to the layouts.
+	entities := modelSpace(drawing.Entities)
+
 	// Compute bounding box
-	bbox := selectionBBox(drawing.Entities, blockMap, sel)
+	bbox := plottedBBox(entities, blockMap, sel, layerMap)
 	bbox.padFlat()
 	if bbox.Width() <= 0 || bbox.Height() <= 0 {
 		if sel != nil {
@@ -392,7 +446,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		r := newRenderer(paper, false)
 		t := NewTransform(bbox, effectiveScale, paper, margin, ParseAlignment(opts.Align), false)
 		r.SetTransform(t)
-		RenderEntities(r, drawing.Entities, layerMap, blockMap, sel)
+		RenderEntities(r, entities, layerMap, blockMap, sel)
 		if opts.DebugBBox {
 			r.DrawDebugBBox(bbox)
 		}
@@ -429,7 +483,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		t := NewTransform(bbox, fitScale, paper, margin, align, landscape)
 		r := newRenderer(paper, landscape)
 		r.SetTransform(t)
-		RenderEntities(r, drawing.Entities, layerMap, blockMap, sel)
+		RenderEntities(r, entities, layerMap, blockMap, sel)
 
 		if opts.DebugBBox {
 			r.DrawDebugBBox(bbox)
@@ -456,7 +510,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 
 	renderer := newRenderer(paper, landscape)
 	totalPages := grid.Cols * grid.Rows
-	boxes := entityBoxes(drawing.Entities, blockMap, sel)
+	boxes := entityBoxes(entities, blockMap, sel, layerMap)
 
 	for row := 0; row < grid.Rows; row++ {
 		for col := 0; col < grid.Cols; col++ {
@@ -486,7 +540,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 				MaxX: tileBBox.MaxX + slack, MaxY: tileBBox.MaxY + slack,
 			}
 			renderer.SetClipRect(margin, margin, printW, printH)
-			RenderEntities(renderer, cullEntities(drawing.Entities, boxes, cullBox), layerMap, blockMap, sel)
+			RenderEntities(renderer, cullEntities(entities, boxes, cullBox), layerMap, blockMap, sel)
 			renderer.ClipEnd()
 			if !opts.Transparent {
 				renderer.MaskOutside(margin, margin, printW, printH)

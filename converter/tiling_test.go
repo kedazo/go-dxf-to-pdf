@@ -15,7 +15,7 @@ func TestCullEntities(t *testing.T) {
 	unknown := dxf.NewLeader() // no extent known → always kept
 
 	ents := []dxf.Entity{in, out, unknown}
-	got := cullEntities(ents, entityBoxes(ents, nil, nil), BBox{MinX: 0, MinY: 0, MaxX: 10, MaxY: 10})
+	got := cullEntities(ents, entityBoxes(ents, nil, nil, nil), BBox{MinX: 0, MinY: 0, MaxX: 10, MaxY: 10})
 	if len(got) != 2 || got[0] != dxf.Entity(in) || got[1] != dxf.Entity(unknown) {
 		t.Errorf("culled = %v, want [in, unknown]", got)
 	}

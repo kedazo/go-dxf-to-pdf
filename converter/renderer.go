@@ -2,6 +2,7 @@ package converter
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"math"
 	"os"
@@ -48,6 +49,90 @@ type Renderer struct {
 
 	lineTypes    *lineTypes    // the drawing's LTYPE table (nil = all solid)
 	leaderArrows *leaderArrows // leader arrowheads by dimension style (nil = none)
+	minStrokeMM  float64       // thinner strokes are widened to this (raster: one pixel)
+	clipPoly     [][2]float64  // page-space clip polygon (viewport), nil = none
+	imageFiles   map[*dxf.Image]string
+	images       map[string]image.Image // decoded image files
+}
+
+// SetClipPolygon clips what follows to a polygon in page coordinates (nil
+// ends it): strokes and fills are cut, text and points are kept when their
+// anchor is inside.
+func (r *Renderer) SetClipPolygon(poly [][2]float64) {
+	r.flush()
+	r.clipPoly = poly
+}
+
+// clippedOut reports whether the page point lies outside the clip polygon.
+func (r *Renderer) clippedOut(px, py float64) bool {
+	return r.clipPoly != nil && !pointInPolygon(px, py, r.clipPoly)
+}
+
+// textClippedOut reports whether a text's page rectangle [x0,x1]×[y0,y1],
+// turned by rotDeg (CCW in DXF terms) about (px, py), lies wholly outside
+// the clip polygon. Text partly inside is drawn whole.
+func (r *Renderer) textClippedOut(px, py, x0, y0, x1, y1, rotDeg float64) bool {
+	if r.clipPoly == nil {
+		return false
+	}
+	// Y-down page: a CCW DXF rotation turns clockwise here.
+	s, c := math.Sincos(-rotDeg * math.Pi / 180)
+	rect := make([][2]float64, 0, 4)
+	for _, p := range [4][2]float64{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}} {
+		dx, dy := p[0]-px, p[1]-py
+		rect = append(rect, [2]float64{px + dx*c - dy*s, py + dx*s + dy*c})
+	}
+	return !polygonsIntersect(rect, r.clipPoly)
+}
+
+// clipFill cuts a fill path (even-odd) to the clip polygon.
+func (r *Renderer) clipFill(p *canvas.Path) *canvas.Path {
+	if r.clipPoly == nil {
+		return p
+	}
+	return p.Settle(canvas.EvenOdd).And(polygonPath(r.clipPoly))
+}
+
+// polygonPath is a closed path through the points.
+func polygonPath(poly [][2]float64) *canvas.Path {
+	p := &canvas.Path{}
+	for i, v := range poly {
+		if i == 0 {
+			p.MoveTo(v[0], v[1])
+		} else {
+			p.LineTo(v[0], v[1])
+		}
+	}
+	p.Close()
+	return p
+}
+
+// clipStrokes cuts a stroke path to the clip polygon; pieces that stay
+// connected remain one subpath.
+func (r *Renderer) clipStrokes(p *canvas.Path) *canvas.Path {
+	var segs [][4]float64
+	for s := p.Flatten(canvas.Tolerance).Scanner(); s.Scan(); {
+		if s.Cmd() == canvas.LineToCmd || s.Cmd() == canvas.CloseCmd {
+			a, b := s.Start(), s.End()
+			segs = append(segs, [4]float64{a.X, a.Y, b.X, b.Y})
+		}
+	}
+	out := &canvas.Path{}
+	var lastX, lastY float64
+	clipToPolygon(segs, r.clipPoly, func(x1, y1, x2, y2 float64) {
+		if out.Empty() || math.Abs(x1-lastX) > 1e-9 || math.Abs(y1-lastY) > 1e-9 {
+			out.MoveTo(x1, y1)
+		}
+		out.LineTo(x2, y2)
+		lastX, lastY = x2, y2
+	})
+	return out
+}
+
+// SetMinStrokeWidth widens every stroke to at least mm (0 = no minimum).
+// Raster output uses one pixel, so hairlines don't fade away.
+func (r *Renderer) SetMinStrokeWidth(mm float64) {
+	r.minStrokeMM = mm
 }
 
 // SetLeaderArrows sets how leader arrowheads are drawn.
@@ -119,6 +204,9 @@ func (r *Renderer) SetStyle(col RGB, lineWidthMM float64) {
 func (r *Renderer) SetDashedStyle(col RGB, lineWidthMM, offset float64, dashes []float64) {
 	rgba := color.RGBA{col.R, col.G, col.B, 255}
 	r.color = rgba
+	if lineWidthMM > 0 {
+		lineWidthMM = max(lineWidthMM, r.minStrokeMM)
+	}
 	if r.styleSet && !r.fillSet && rgba == r.strokeCol && lineWidthMM == r.strokeW &&
 		offset == r.dashOffset && slices.Equal(dashes, r.dashes) {
 		return // same style: keep batching
@@ -214,6 +302,11 @@ func (r *Renderer) flush() {
 			return
 		}
 	}
+	if r.clipPoly != nil {
+		if p = r.clipStrokes(p); p.Empty() {
+			return
+		}
+	}
 	if !r.batch && r.dashes != nil {
 		// The rasterizer can panic stroking connected chains (see
 		// SetBatching): draw the dash pieces one segment at a time.
@@ -301,7 +394,7 @@ func (r *Renderer) DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4 float64) {
 	p.LineTo(r.transform.X(x4), r.transform.Y(y4))
 	p.LineTo(r.transform.X(x3), r.transform.Y(y3))
 	p.Close()
-	r.ctx.DrawPath(0, 0, p)
+	r.ctx.DrawPath(0, 0, r.clipFill(p))
 }
 
 // FillPolygons fills a set of closed loops (DXF world coordinates) as one
@@ -326,14 +419,14 @@ func (r *Renderer) FillPolygons(polys [][][2]float64, col RGB) {
 	r.ctx.SetFillColor(color.RGBA{col.R, col.G, col.B, 255})
 	r.ctx.SetStrokeColor(color.RGBA{0, 0, 0, 0})
 	r.ctx.SetFillRule(canvas.EvenOdd)
-	r.ctx.DrawPath(0, 0, p)
+	r.ctx.DrawPath(0, 0, r.clipFill(p))
 	r.ctx.Pop()
 }
 
 func (r *Renderer) DrawPoint(x, y float64) {
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
-	if r.outsideClip(px, py, 0.2) {
+	if r.outsideClip(px, py, 0.2) || r.clippedOut(px, py) {
 		return
 	}
 	r.flush()
@@ -476,6 +569,9 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hA
 	}
 	dx := -hAlign * width
 	dy := baselineShift(scaledH, face.Metrics().Descent, vAlign)
+	if r.textClippedOut(px, py, px+dx, py+dy-scaledH, px+dx+width, py+dy+face.Metrics().Descent, rotationDeg) {
+		return
+	}
 
 	if math.Abs(rotationDeg) > 0.01 {
 		r.ctx.Push()
@@ -604,6 +700,10 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	if r.outsideClip(px, py, maxW+n*advance+2*defaultScaledH) {
 		return
 	}
+	if r.textClippedOut(px, py, px-hAlign*maxW, firstBaseline-defaultScaledH, px+(1-hAlign)*maxW,
+		firstBaseline+(n-1)*advance+defaultScaledH*estDescent, rotationDeg) {
+		return
+	}
 
 	if math.Abs(rotationDeg) > 0.01 {
 		r.ctx.Push()
@@ -635,7 +735,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				}
 				r.ctx.Push()
 				r.ctx.SetStrokeColor(it.col)
-				r.ctx.SetStrokeWidth(it.h * 0.07)
+				r.ctx.SetStrokeWidth(max(it.h*0.07, r.minStrokeMM))
 				r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
 				// Drawn in the (possibly rotated) text frame, so not
 				// clipped against the page-space clip rect.
@@ -778,11 +878,16 @@ func (r *Renderer) savePDF(path string, pages []*canvas.Canvas) error {
 	return p.Close()
 }
 
-func (r *Renderer) saveRaster(path string, pages []*canvas.Canvas, dpi float64, transparent bool, format string) error {
+// rasterDPI is the raster resolution used for a requested DPI (0 = default).
+func rasterDPI(dpi float64) float64 {
 	if dpi <= 0 {
-		dpi = 300
+		return 300
 	}
-	res := canvas.DPI(dpi)
+	return dpi
+}
+
+func (r *Renderer) saveRaster(path string, pages []*canvas.Canvas, dpi float64, transparent bool, format string) error {
+	res := canvas.DPI(rasterDPI(dpi))
 
 	for i, c := range pages {
 		pagePath := path

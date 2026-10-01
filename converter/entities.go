@@ -23,6 +23,60 @@ type drawCtx struct {
 
 	filter   *layerFilter // --layers selection (nil = all)
 	selected bool         // an enclosing INSERT is on a selected layer
+
+	hiddenLayers map[string]layerHide // layers that don't plot
+	vpFrozen     map[string]bool      // layers frozen in the current viewport
+	vp           *viewportSource      // what VIEWPORTs show (nil = don't draw viewports)
+	ltScale      float64              // extra line type scale (0 = 1), for $PSLTSCALE
+}
+
+// layerHide is why a layer doesn't plot.
+type layerHide uint8
+
+const (
+	layerFrozen layerHide = 1 << iota // hides everything on it, block content included
+	layerNoPlot                       // hides what is drawn on it
+)
+
+// hiddenLayersOf returns the frozen and non-plotting layers (and Defpoints,
+// which never plots).
+func hiddenLayersOf(layers map[string]dxf.Layer) map[string]layerHide {
+	hidden := map[string]layerHide{}
+	for name, l := range layers {
+		var h layerHide
+		if l.Flags&1 != 0 {
+			h |= layerFrozen
+		}
+		if !l.IsLayerPlotted || strings.EqualFold(name, "Defpoints") {
+			h |= layerNoPlot
+		}
+		if h != 0 {
+			hidden[name] = h
+		}
+	}
+	return hidden
+}
+
+// hidden reports whether ent doesn't plot: it is on a frozen layer (also in
+// the current viewport) or, unless it's an INSERT whose content may be on
+// other layers, on a non-plotting one. Layers selected by name with
+// --layers are shown anyway (except where a viewport freezes them).
+func (ctx drawCtx) hidden(ent dxf.Entity) bool {
+	if len(ctx.hiddenLayers) == 0 && len(ctx.vpFrozen) == 0 {
+		return false
+	}
+	layer := ctx.effectiveLayer(ent)
+	if ctx.vpFrozen[layer] {
+		return true
+	}
+	h := ctx.hiddenLayers[layer]
+	if h != 0 && ctx.filter != nil && ctx.filter.match(layer) {
+		return false // asked for by name with --layers
+	}
+	if _, isInsert := ent.(*dxf.Insert); isInsert {
+		return h&layerFrozen != 0
+	}
+	return h != 0
 }
 
 // maxBlockDepth guards against runaway (or cyclic) block nesting.
@@ -34,6 +88,14 @@ var topCtx = drawCtx{m: identityAffine, lw: defaultLineWidthMM}
 func filtered(f *layerFilter) drawCtx {
 	ctx := topCtx
 	ctx.filter = f
+	return ctx
+}
+
+// plotted returns the top-level context for a layer selection that also
+// leaves out the layers that don't plot.
+func plotted(f *layerFilter, layers map[string]dxf.Layer) drawCtx {
+	ctx := filtered(f)
+	ctx.hiddenLayers = hiddenLayersOf(layers)
 	return ctx
 }
 
@@ -119,8 +181,13 @@ func ComputeBoundingBox(entities []dxf.Entity, blocks map[string]*dxf.Block) BBo
 // selectionBBox is the bounding box of the entities passing the layer
 // selection f (nil = all).
 func selectionBBox(entities []dxf.Entity, blocks map[string]*dxf.Block, f *layerFilter) BBox {
+	return plottedBBox(entities, blocks, f, nil)
+}
+
+// plottedBBox is selectionBBox leaving out the layers that don't plot.
+func plottedBBox(entities []dxf.Entity, blocks map[string]*dxf.Block, f *layerFilter, layers map[string]dxf.Layer) BBox {
 	bb := NewBBox()
-	ctx := filtered(f)
+	ctx := plotted(f, layers)
 	for _, ent := range entities {
 		expandBBoxForEntity(&bb, ent, blocks, ctx)
 	}
@@ -130,9 +197,9 @@ func selectionBBox(entities []dxf.Entity, blocks map[string]*dxf.Block, f *layer
 // entityBoxes returns the world bbox of every top-level entity (of its parts
 // passing the layer selection f). Entities without a known extent get an
 // empty bbox (see cullEntities).
-func entityBoxes(entities []dxf.Entity, blocks map[string]*dxf.Block, f *layerFilter) []BBox {
+func entityBoxes(entities []dxf.Entity, blocks map[string]*dxf.Block, f *layerFilter, layers map[string]dxf.Layer) []BBox {
 	boxes := make([]BBox, len(entities))
-	ctx := filtered(f)
+	ctx := plotted(f, layers)
 	for i, ent := range entities {
 		boxes[i] = NewBBox()
 		expandBBoxForEntity(&boxes[i], ent, blocks, ctx)
@@ -229,7 +296,7 @@ func expandEllipticArc(bb *BBox, cx, cy, ux, uy, vx, vy, t0, t1 float64) {
 // expandBBoxForEntity expands the bounding box with the given entity, mapped
 // through ctx.m (block-local → world), if it passes the layer selection.
 func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block, ctx drawCtx) {
-	if ctx.depth > maxBlockDepth || !ent.IsVisible() {
+	if ctx.depth > maxBlockDepth || !ent.IsVisible() || ctx.hidden(ent) {
 		return
 	}
 	if _, isInsert := ent.(*dxf.Insert); !isInsert && !ctx.keeps(ent) {
@@ -296,6 +363,14 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		for _, p := range wipeoutPolygon(e) {
 			expand(m, p[0], p[1])
 		}
+	case *dxf.Viewport:
+		expand(m, e.Center.X-e.Width/2, e.Center.Y-e.Height/2)
+		expand(m, e.Center.X+e.Width/2, e.Center.Y+e.Height/2)
+	case *dxf.Image:
+		loc, u, v, s := e.Location(), e.UVector(), e.VVector(), e.ImageSize()
+		for _, f := range [][2]float64{{0, 0}, {1, 0}, {1, 1}, {0, 1}} {
+			expand(m, loc.X+u.X*s.X*f[0]+v.X*s.Y*f[1], loc.Y+u.Y*s.X*f[0]+v.Y*s.Y*f[1])
+		}
 	case *dxf.Solid:
 		om := m.mul(ocsAffine(e.ExtrusionDirection, e.FirstCorner.Z))
 		for _, p := range []dxf.Point{e.FirstCorner, e.SecondCorner, e.ThirdCorner, e.FourthCorner} {
@@ -350,7 +425,10 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 func RenderEntities(r *Renderer, entities []dxf.Entity, layers map[string]dxf.Layer,
 	blocks map[string]*dxf.Block, sel *layerFilter) {
 
-	ctx := filtered(sel)
+	renderAll(r, entities, layers, blocks, plotted(sel, layers))
+}
+
+func renderAll(r *Renderer, entities []dxf.Entity, layers map[string]dxf.Layer, blocks map[string]*dxf.Block, ctx drawCtx) {
 	for _, ent := range entities {
 		renderEntity(r, ent, layers, blocks, ctx)
 	}
@@ -359,7 +437,15 @@ func RenderEntities(r *Renderer, entities []dxf.Entity, layers map[string]dxf.La
 func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 	blocks map[string]*dxf.Block, ctx drawCtx) {
 
-	if ctx.depth > maxBlockDepth || !ent.IsVisible() {
+	// A viewport's layer only governs its border: the view itself plots
+	// even when that layer doesn't.
+	if v, ok := ent.(*dxf.Viewport); ok {
+		if v.IsVisible() && ctx.depth <= maxBlockDepth {
+			renderViewport(r, v, layers, blocks, ctx)
+		}
+		return
+	}
+	if ctx.depth > maxBlockDepth || !ent.IsVisible() || ctx.hidden(ent) {
 		return
 	}
 
@@ -375,6 +461,9 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		ltScale := ent.LineTypeScale()
 		if ltScale <= 0 {
 			ltScale = 1
+		}
+		if ctx.ltScale > 0 { // $PSLTSCALE: patterns sized in paper units in viewports
+			ltScale *= ctx.ltScale
 		}
 		offset, dashes := dashPattern(pattern, r.lineTypes.scale*ltScale*m.linearScale()*r.transform.Scale)
 		r.SetDashedStyle(rgb, lw, offset, dashes)
@@ -449,6 +538,9 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 
 	case *dxf.Leader:
 		renderLeader(r, e, layers, blocks, ctx, rgb)
+
+	case *dxf.Image:
+		renderImage(r, e, m)
 
 	case *dxf.Wipeout:
 		// Masks what was drawn before it with the paper color.

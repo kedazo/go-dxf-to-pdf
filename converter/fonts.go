@@ -60,6 +60,25 @@ var fontFallbacks = map[string][]fontCandidate{
 	"mono":   {liberation("LiberationMono"), dejaVu("DejaVuSansMono", "Oblique", 1.10)},
 }
 
+// extraNarrow lists fonts narrower than the substitute of their category,
+// with their width relative to it (Arial Narrow, Arial).
+var extraNarrow = map[string]float64{
+	"agency":    0.85, // Agency FB (AGENCYR.TTF / AGENCYB.TTF)
+	"yugoth":    0.92, // Yu Gothic (YuGothL.ttc, …): narrower Latin than Arial
+	"yu gothic": 0.92,
+}
+
+// fontNarrowing returns the extra horizontal scale for a CAD font name.
+func fontNarrowing(name string) float64 {
+	n := strings.ToLower(name)
+	for key, f := range extraNarrow {
+		if strings.Contains(n, key) {
+			return f
+		}
+	}
+	return 1
+}
+
 // fontCategory classifies a CAD font name for substitution.
 func fontCategory(name string) string {
 	n := strings.ToLower(name)
@@ -73,7 +92,7 @@ func fontCategory(name string) string {
 		return false
 	}
 	switch {
-	case has("narrow", "cond") || n == "arialn" || strings.HasPrefix(n, "arialn"):
+	case has("narrow", "cond", "agency") || n == "arialn" || strings.HasPrefix(n, "arialn"):
 		return "narrow"
 	case has("mono", "cour", "consol", "console", "typewriter"):
 		return "mono"
@@ -220,10 +239,21 @@ func (l *fontLib) resolve(name string) *fontSet {
 	newSet := func(files [4]string, widthComp float64) *fontSet {
 		return &fontSet{files: files, family: canvas.NewFontFamily(filepath.Base(files[0])), widthComp: widthComp}
 	}
-	// The font file itself (TrueType fonts named by file).
+	// The font file itself (TrueType fonts named by file), with its bold and
+	// italic siblings by the usual file names (arialbd/ariali/arialbi.ttf,
+	// georgiab/georgiai/georgiaz.ttf, Name-Bold.ttf, …).
 	if ext := filepath.Ext(name); ext == ".ttf" || ext == ".otf" {
 		if path := l.find(name); path != "" {
-			return newSet([4]string{path}, 1)
+			stem := strings.TrimSuffix(name, ext)
+			files := [4]string{path}
+			for slot, suffixes := range [4][]string{1: {"bd", "b", "-bold"}, 2: {"i", "-italic", "-oblique"}, 3: {"bi", "z", "-bolditalic", "-boldoblique"}} {
+				for _, s := range suffixes {
+					if files[slot] = l.find(stem + s + ext); files[slot] != "" {
+						break
+					}
+				}
+			}
+			return newSet(files, 1)
 		}
 	}
 	for _, c := range fontFallbacks[fontCategory(name)] {
@@ -234,7 +264,7 @@ func (l *fontLib) resolve(name string) *fontSet {
 		for i := 1; i < 4; i++ {
 			files[i] = l.find(c.files[i])
 		}
-		return newSet(files, c.widthComp)
+		return newSet(files, c.widthComp*fontNarrowing(name))
 	}
 	if name != "" {
 		return l.resolve("") // plain sans
