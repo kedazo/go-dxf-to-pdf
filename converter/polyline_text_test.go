@@ -321,6 +321,14 @@ func TestMTextParagraphs(t *testing.T) {
 	if b := drawn(`\pxtc20;`+"\t"+`bbb`, 0); math.Abs((b.X0+b.X1)/2-110) > 0.5 {
 		t.Errorf("centre tab stop: text spans %v..%v, want it centred at 110", b.X0, b.X1)
 	}
+	// Justified: wrapped lines reach the box's right edge (x = 70); the
+	// paragraph's last line stays left aligned.
+	words := `aaa bb cccc d eee ffff gg hhh iiii jj kkk l mmmm`
+	left, just := drawn(`\pql;`+words, 60), drawn(`\pqj;`+words, 60)
+	space := drawn("a ", 0).W() - drawn("a", 0).W() // the bounds include a wrapped line's trailing space
+	if left.X1-space > 69 || math.Abs(just.X1-space-70) > 0.3 || math.Abs(just.H()-left.H()) > 1e-6 {
+		t.Errorf("justified lines end at x=%v (left aligned %v), want 70 and the same lines", just.X1-space, left.X1-space)
+	}
 	// Centred in a 100 mm box from x = 10: the text's middle is near 60.
 	if b := drawn(`\pqc;ab`, 100); math.Abs((b.X0+b.X1)/2-60) > 1 {
 		t.Errorf("centred: text spans %v..%v, want it centred at 60", b.X0, b.X1)

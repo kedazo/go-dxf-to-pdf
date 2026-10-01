@@ -800,6 +800,18 @@ func splitMTextRun(text string, words bool) []string {
 	return pieces
 }
 
+// justifyGaps counts the word gaps a justified line can widen: the items
+// ending in a space, except the last.
+func justifyGaps(items []mtextItem) int {
+	n := 0
+	for _, it := range items[:max(len(items)-1, 0)] {
+		if it.width > it.ink {
+			n++
+		}
+	}
+	return n
+}
+
 // drawStack draws a stacked fraction item with its left edge at x on the
 // baseline y: one part above the other, with a bar between them (a/b) or
 // without (a^b), or side by side with a slash (a#b).
@@ -851,12 +863,14 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	lines := [][]mtextItem{nil}
 	paras := []dxf.MTextParagraph{{}} // the paragraph of each line
 	firstOfPara := []bool{true}
-	x0 := 0.0         // pen position in the current line
-	started := false // the current line has its indent
+	hasTab := []bool{false} // tab columns aren't justified
+	x0 := 0.0               // pen position in the current line
+	started := false        // the current line has its indent
 	newLine := func(paragraphStart bool) {
 		lines = append(lines, nil)
 		paras = append(paras, dxf.MTextParagraph{})
 		firstOfPara = append(firstOfPara, paragraphStart)
+		hasTab = append(hasTab, false)
 		x0, started = 0, false
 	}
 	// begin starts a line's content: it takes the paragraph's indent.
@@ -917,6 +931,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		alignTabbed()
 		canBreak = true
 		begin(p)
+		hasTab[len(lines)-1] = true
 		for _, stop := range p.TabStops {
 			if pos := stop.Position * defaultScaledH; pos > x0+1e-9 {
 				if stop.Type != dxf.MTextTabStopLeft {
@@ -1074,18 +1089,31 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		align := hAlign // the attachment point's, unless the paragraph sets one
 		switch paras[li].Alignment {
 		case dxf.MTextParagraphAlignmentLeft, dxf.MTextParagraphAlignmentJustified, dxf.MTextParagraphAlignmentDistributed:
-			align = 0 // justified and distributed lines are drawn left aligned
+			align = 0
 		case dxf.MTextParagraphAlignmentCenter:
 			align = 0.5
 		case dxf.MTextParagraphAlignmentRight:
 			align = 1
 		}
 		// Lines align between the indents (the left one is in the item offsets).
-		lineX := boxLeft + (boxW-paras[li].RightIndent*defaultScaledH-lineWidth(items))*align
+		free := boxW - paras[li].RightIndent*defaultScaledH - lineWidth(items)
+		lineX := boxLeft + free*align
+		lastOfPara := li+1 == len(lines) || firstOfPara[li+1]
+		gap := 0.0 // justification: extra space after each word
+		if a := paras[li].Alignment; boxWidthMM > 0 && free > 0 && !hasTab[li] &&
+			(a == dxf.MTextParagraphAlignmentJustified && !lastOfPara || a == dxf.MTextParagraphAlignmentDistributed) {
+			if n := justifyGaps(items); n > 0 {
+				gap = free / float64(n)
+			}
+		}
 		curY := firstBaseline + float64(li)*advance
 
+		spread := 0.0
 		for _, it := range items {
-			curX := lineX + it.x
+			curX := lineX + it.x + spread
+			if it.width > it.ink {
+				spread += gap
+			}
 			if it.den != nil {
 				r.drawStack(it, curX, curY)
 				continue
@@ -1112,7 +1140,11 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				// clipped against the page-space clip rect.
 				dp := &canvas.Path{}
 				dp.MoveTo(curX, curY+deco.dy)
-				dp.LineTo(curX+it.width, curY+deco.dy)
+				w := it.width
+				if it.width > it.ink {
+					w += gap // through a justified word gap
+				}
+				dp.LineTo(curX+w, curY+deco.dy)
 				r.ctx.DrawPath(0, 0, dp)
 				r.ctx.Pop()
 			}
