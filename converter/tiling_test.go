@@ -83,6 +83,26 @@ func TestTextCutAtClip(t *testing.T) {
 	}
 }
 
+// Curves are clipped by their true extent: canvas' FastBounds misses the
+// end of a cubic beyond its second control point.
+func TestClipPathCurveBounds(t *testing.T) {
+	c := curveThrough([][2]float64{{0, 0}, {10, 10}, {20, 0}})
+	p := &canvas.Path{}
+	p.MoveTo(c[0][0][0], c[0][0][1])
+	for _, b := range c {
+		p.CubeTo(b[1][0], b[1][1], b[2][0], b[2][1], b[3][0], b[3][1])
+	}
+	if b := hullBounds(p); b.X1 < 20 {
+		t.Errorf("hull bounds end at x=%v, want 20", b.X1)
+	}
+	if b := clipPath(p, canvas.Rect{X0: -1, Y0: -1, X1: 19, Y1: 11}).Bounds(); b.X1 > 19+1e-6 {
+		t.Errorf("clipped curve reaches x=%v, past the clip at 19", b.X1)
+	}
+	if clipPath(p, canvas.Rect{X0: 19, Y0: -1, X1: 30, Y1: 11}).Empty() {
+		t.Error("the curve's piece past x=19 was dropped")
+	}
+}
+
 // Closed shapes clipped by a viewport keep the join at their start point.
 func TestClipStrokesKeepsStartJoin(t *testing.T) {
 	r := &Renderer{clipPoly: [][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}}}

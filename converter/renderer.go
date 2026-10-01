@@ -117,7 +117,7 @@ func (r *Renderer) clipFill(p *canvas.Path) *canvas.Path {
 // polygon and the clip rectangle (only fills crossing its edge are cut).
 func (r *Renderer) clipFillRule(p *canvas.Path, rule canvas.FillRule) *canvas.Path {
 	if r.clip != nil {
-		b := p.FastBounds()
+		b := hullBounds(p)
 		switch {
 		case b.X1 < r.clip.X0 || b.X0 > r.clip.X1 || b.Y1 < r.clip.Y0 || b.Y0 > r.clip.Y1:
 			return &canvas.Path{}
@@ -479,12 +479,12 @@ func strokeOutline(p *canvas.Path, w, tolerance float64) (outline *canvas.Path) 
 // its edge are flattened and clipped.
 func clipPath(p *canvas.Path, c canvas.Rect) *canvas.Path {
 	inside := func(b canvas.Rect) bool { return b.X0 >= c.X0 && b.X1 <= c.X1 && b.Y0 >= c.Y0 && b.Y1 <= c.Y1 }
-	if inside(p.FastBounds()) {
+	if inside(hullBounds(p)) {
 		return p
 	}
 	clipped := &canvas.Path{}
 	for _, sp := range p.Split() {
-		switch b := sp.FastBounds(); {
+		switch b := hullBounds(sp); {
 		case b.X1 < c.X0 || b.X0 > c.X1 || b.Y1 < c.Y0 || b.Y0 > c.Y1:
 		case inside(b):
 			clipped = clipped.Append(sp)
@@ -493,6 +493,33 @@ func clipPath(p *canvas.Path, c canvas.Rect) *canvas.Path {
 		}
 	}
 	return clipped
+}
+
+// hullBounds returns a rectangle around a path's points and control points,
+// which holds the path. (canvas' FastBounds misses the end of a cubic that
+// lies beyond its second control point; Bounds solves for the extremes.)
+func hullBounds(p *canvas.Path) canvas.Rect {
+	b := canvas.Rect{X0: math.Inf(1), Y0: math.Inf(1), X1: math.Inf(-1), Y1: math.Inf(-1)}
+	add := func(q canvas.Point) {
+		b.X0, b.X1 = min(b.X0, q.X), max(b.X1, q.X)
+		b.Y0, b.Y1 = min(b.Y0, q.Y), max(b.Y1, q.Y)
+	}
+	for s := p.Scanner(); s.Scan(); {
+		switch s.Cmd() {
+		case canvas.ArcToCmd:
+			return p.Bounds()
+		case canvas.QuadToCmd:
+			add(s.CP1())
+		case canvas.CubeToCmd:
+			add(s.CP1())
+			add(s.CP2())
+		}
+		add(s.End())
+	}
+	if b.X0 > b.X1 {
+		return canvas.Rect{}
+	}
+	return b
 }
 
 // outsideClip reports whether the page point (px, py), grown by pad mm in
@@ -819,7 +846,7 @@ func (r *Renderer) drawText(x, y float64, line *canvas.Text) {
 	// The matrix Context.DrawText uses, into canvas coordinates.
 	m := r.ctx.CoordSystemView().Mul(r.ctx.View()).Translate(x, y).ReflectY()
 	clip := canvas.Rectangle(r.clip.W(), r.clip.H()).Translate(r.clip.X0, r.clip.Y0).Transform(r.ctx.CoordSystemView())
-	c, b := clip.FastBounds(), line.Bounds().Transform(m)
+	c, b := clip.FastBounds(), line.OutlineBounds().Add(line.Bounds()).Transform(m) // glyphs may overhang their advance
 	switch {
 	case b.X0 >= c.X0 && b.X1 <= c.X1 && b.Y0 >= c.Y0 && b.Y1 <= c.Y1: // inside
 		r.ctx.DrawText(x, y, line)
@@ -1077,7 +1104,15 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		begin(it.seg.Style.Paragraph)
 		last := len(lines) - 1
 		limit := wrapWidthMM - paras[last].RightIndent*defaultScaledH
-		if wrapWidthMM > 0 && canBreak && len(lines[last]) > 0 && x0+wrapInk > limit {
+		extent := x0 + wrapInk
+		if g := tabbed; g != nil { // it will move back to end at or centre on the stop
+			shift := -(extent - g.stop)
+			if g.kind == dxf.MTextTabStopCenter {
+				shift /= 2
+			}
+			extent += max(shift, g.from-g.stop)
+		}
+		if wrapWidthMM > 0 && canBreak && len(lines[last]) > 0 && extent > limit {
 			tabbed = nil // wrapped: left as a left stop
 			newLine(false)
 			begin(it.seg.Style.Paragraph)
@@ -1196,12 +1231,13 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			if t := seg.Style.Tracking; t > 0 && math.Abs(t-1) > 1e-9 {
 				// \T: each character on its own, its advance scaled.
 				wrapInk := ink * t
-				for _, ch := range piece {
+				chars := []rune(piece)
+				for i, ch := range chars {
 					textLine := r.textLine(face, string(ch))
 					adv := textLine.Bounds().W() * look.width
 					it := mtextItem{seg: seg, line: textLine, look: look, width: adv * t, ink: adv, h: scaledH, rise: dy, col: textColor}
-					if ch == ' ' {
-						it.ink, it.space = 0, true
+					if ch == ' ' { // a run of spaces is one break (and justify gap), after its last
+						it.ink, it.space = 0, i+1 == len(chars) || chars[i+1] != ' '
 					}
 					place(it, wrapInk)
 					wrapInk = it.ink
@@ -1287,7 +1323,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		curY := firstBaseline + float64(li)*advance
 
 		spread := 0.0
-		for _, it := range items {
+		for k, it := range items {
 			curX := lineX + it.x + spread
 			if it.space {
 				spread += gap
@@ -1319,8 +1355,8 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				dp := &canvas.Path{}
 				dp.MoveTo(curX, curY+deco.dy)
 				w := it.width
-				if it.space {
-					w += gap // through a justified word gap
+				if it.space && k < len(items)-1 {
+					w += gap // through a justified word gap (see justifyGaps)
 				}
 				dp.LineTo(curX+w, curY+deco.dy)
 				r.ctx.DrawPath(0, 0, dp)

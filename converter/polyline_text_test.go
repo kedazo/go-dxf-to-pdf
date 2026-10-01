@@ -329,6 +329,15 @@ func TestMTextParagraphs(t *testing.T) {
 	if left.X1-space > 69 || math.Abs(just.X1-space-70) > 0.3 || math.Abs(just.H()-left.H()) > 1e-6 {
 		t.Errorf("justified lines end at x=%v (left aligned %v), want 70 and the same lines", just.X1-space, left.X1-space)
 	}
+	// A right stop near the box edge keeps its text on the line (it ends at
+	// the stop, 55 mm in, inside the 60 mm box).
+	if b := drawn(`\pxtr11;a`+"\t"+`bbb`, 60); b.H() > 12 || math.Abs(b.X1-65) > 0.5 {
+		t.Errorf("right stop at the box edge: text ends at x=%v, %v mm tall; want one line ending at 65", b.X1, b.H())
+	}
+	// Underlines of justified lines end with their text.
+	if b := drawn(`\pqj;\L`+words, 60); math.Abs(b.X1-space-70) > 0.1 {
+		t.Errorf("justified underline ends at x=%v, want 70", b.X1-space)
+	}
 	// \T2 doubles the character advances; tracked words still wrap whole.
 	// (The bounds end at the last letter's own advance.)
 	want := drawn(`ABCD`, 0).W() + drawn(`ABC`, 0).W()
