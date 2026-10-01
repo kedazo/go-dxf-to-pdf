@@ -4,6 +4,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	dxf "github.com/kedazo/dxf-go"
 )
@@ -120,6 +121,89 @@ func resolveTextAnchor(loc, second dxf.Point, hj dxf.HorizontalTextJustification
 		a.X, a.Y = second.X, second.Y
 	}
 	return a
+}
+
+// Text extents for bounding boxes are estimated, not measured (fonts are
+// only loaded for drawing): a glyph advances about 0.8 × the cap height,
+// descenders reach 0.3 × the cap height below the baseline.
+const (
+	estCharWidth = 0.8
+	estDescent   = 0.3
+)
+
+// expandRotatedRect expands bb with the rectangle [x0,x1]×[y0,y1] given
+// relative to (ax, ay) and rotated about it by rotDeg, mapped through t.
+func expandRotatedRect(bb *BBox, t affine, ax, ay, rotDeg, x0, x1, y0, y1 float64) {
+	s, c := math.Sincos(rotDeg * math.Pi / 180)
+	for _, p := range [4][2]float64{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}} {
+		bb.Expand(t.apply(ax+p[0]*c-p[1]*s, ay+p[0]*s+p[1]*c))
+	}
+}
+
+// expandTextLine expands bb with the estimated extent of a single-line
+// TEXT/ATTRIB anchored at a (entity coordinates, mapped through t).
+func expandTextLine(bb *BBox, t affine, value string, height, widthFactor float64, a textAnchor) {
+	if height <= 0 {
+		bb.Expand(t.apply(a.X, a.Y))
+		return
+	}
+	if widthFactor <= 0 {
+		widthFactor = 1
+	}
+	w := float64(utf8.RuneCountInString(value)) * estCharWidth * height * widthFactor
+	x0 := -a.HAlign * w
+	var y0, y1 float64
+	switch a.VAlign {
+	case vAlignBottom:
+		y0, y1 = 0, (1+estDescent)*height
+	case vAlignMiddle:
+		y0, y1 = -(0.5+estDescent)*height, height/2
+	case vAlignTop:
+		y0, y1 = -(1+estDescent)*height, 0
+	default: // baseline
+		y0, y1 = -estDescent*height, height
+	}
+	expandRotatedRect(bb, t, a.X, a.Y, a.RotationDeg, x0, x0+w, y0, y1)
+}
+
+// expandMText expands bb with the estimated extent of an MTEXT, laid out as
+// DrawMText does (line pitch 5/3 of the height, attachment point anchor).
+func expandMText(bb *BBox, m affine, e *dxf.MText) {
+	h := e.InitialTextHeight
+	if h <= 0 {
+		bb.Expand(m.apply(e.InsertionPoint.X, e.InsertionPoint.Y))
+		return
+	}
+	lines, maxRunes, cur := 1, 0, 0
+	for _, s := range ParseMText(e.FormattedText()) {
+		if s.NewLine {
+			lines, cur = lines+1, 0
+			continue
+		}
+		cur += utf8.RuneCountInString(s.Text)
+		maxRunes = max(maxRunes, cur)
+	}
+	spacing := e.LineSpacingFactor
+	if spacing <= 0 {
+		spacing = 1
+	}
+	w := float64(maxRunes) * estCharWidth * h
+	total := h + float64(lines-1)*h*5/3*spacing
+	attach := int(e.AttachmentPoint)
+	if attach < 1 || attach > 9 {
+		attach = 1
+	}
+	x0 := -float64((attach-1)%3) / 2 * w
+	var y0, y1 float64
+	switch (attach - 1) / 3 {
+	case 0: // top
+		y0, y1 = -total-estDescent*h, 0
+	case 1: // middle
+		y0, y1 = -total/2-estDescent*h, total/2
+	default: // bottom
+		y0, y1 = -estDescent*h, total
+	}
+	expandRotatedRect(bb, m, e.InsertionPoint.X, e.InsertionPoint.Y, mtextRotationDeg(e), x0, x0+w, y0, y1)
 }
 
 // mtextRotationDeg returns the MTEXT rotation in degrees. The X-axis direction

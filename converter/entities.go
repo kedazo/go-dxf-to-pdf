@@ -260,8 +260,13 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		expandEllipticArc(bb, cx, cy, ux, uy, vx, vy, t0, t1)
 	case *dxf.LWPolyline:
 		om := m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation()))
-		for _, v := range e.Vertices {
+		verts := e.Vertices
+		for i, v := range verts {
 			expand(om, v.X, v.Y)
+			if j := i + 1; j < len(verts) || (e.IsClosed() && len(verts) > 1) {
+				w := verts[j%len(verts)]
+				expandBulge(bb, om, v.X, v.Y, w.X, w.Y, v.Bulge)
+			}
 		}
 	case *dxf.Polyline:
 		// Use the edges, not the raw vertices: polyface face records sit at
@@ -270,15 +275,17 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		for _, edge := range polylineEdges(e) {
 			expand(om, edge.X1, edge.Y1)
 			expand(om, edge.X2, edge.Y2)
+			expandBulge(bb, om, edge.X1, edge.Y1, edge.X2, edge.Y2, edge.Bulge)
 		}
 	case *dxf.Spline:
 		for _, cp := range e.ControlPoints {
 			expand(m, cp.Point.X, cp.Point.Y)
 		}
 	case *dxf.Text:
-		expand(m.mul(ocsAffine(e.Normal, e.Location.Z)), e.Location.X, e.Location.Y)
+		expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.Height, e.RelativeXScaleFactor,
+			resolveTextAnchor(e.Location, e.SecondAlignmentPoint, e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
 	case *dxf.MText:
-		expand(m, e.InsertionPoint.X, e.InsertionPoint.Y)
+		expandMText(bb, m, e)
 	case *dxf.ModelPoint:
 		expand(m, e.Location.X, e.Location.Y)
 	case *dxf.Solid:
@@ -300,8 +307,13 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 			expandBBoxForEntity(bb, &e.Attributes[i], blocks, actx)
 		}
 	case *dxf.Attribute:
-		if !e.IsInvisible() {
-			expand(m.mul(ocsAffine(e.Normal, e.Location.Z)), e.Location.X, e.Location.Y)
+		switch {
+		case e.IsInvisible():
+		case e.MTextFlag&dxf.MTextFlagMultilineAttribute != 0 && e.MText.Text != "":
+			expandMText(bb, m, &e.MText)
+		default:
+			expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.TextHeight, e.RelativeXScaleFactor,
+				resolveTextAnchor(e.Location, e.SecondAlignmentPoint, e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
 		}
 	case *dxf.Hatch:
 		om := m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation()))
@@ -531,6 +543,21 @@ func renderMText(r *Renderer, e *dxf.MText, m affine) {
 		attach = row*3 + (2 - col) + 1
 	}
 	r.DrawMText(x, y, segments, e.InitialTextHeight*hScale, rot, attach, e.LineSpacingFactor, r.styleFont(e.TextStyleName))
+}
+
+// expandBulge expands bb with the arc of a bulged polyline edge (local
+// coordinates, mapped through m); straight edges add nothing.
+func expandBulge(bb *BBox, m affine, x1, y1, x2, y2, bulge float64) {
+	if math.Abs(bulge) <= 1e-10 || (x1 == x2 && y1 == y2) {
+		return
+	}
+	lcx, lcy, radius, start, sweep := bulgeArc(x1, y1, x2, y2, bulge)
+	cx, cy, ux, uy, vx, vy := circleArcAxes(m, lcx, lcy, radius)
+	t0, t1 := start, start+sweep
+	if t1 < t0 {
+		t0, t1 = t1, t0
+	}
+	expandEllipticArc(bb, cx, cy, ux, uy, vx, vy, t0, t1)
 }
 
 // drawEdge draws a straight or bulged (arc) polyline edge given in local

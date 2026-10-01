@@ -146,6 +146,44 @@ func TestEllipseInRotatedInsertBBox(t *testing.T) {
 	}
 }
 
+// A bulged edge's arc bulges past its vertices; a drawing of only such
+// edges must not be "empty".
+func TestBulgeArcInBBox(t *testing.T) {
+	pl := dxf.NewLWPolyline()
+	pl.Vertices = []dxf.LwVertex{{X: -1, Y: 0, Bulge: 1}, {X: 1, Y: 0}} // CCW half circle, apex (0,-1)
+	bb := ComputeBoundingBox([]dxf.Entity{pl}, nil)
+	if !near(bb.MinY, -1) || !near(bb.MaxY, 0) || !near(bb.MinX, -1) || !near(bb.MaxX, 1) {
+		t.Errorf("bbox = %+v, want (-1,-1)-(1,0)", bb)
+	}
+}
+
+// Text extends from its anchor, so labels crossing a tile edge are kept.
+func TestTextExtentsInBBox(t *testing.T) {
+	txt := dxf.NewText()
+	txt.Value = "ABCDE" // ~5 × 0.8 × 2 = 8 wide
+	txt.Height = 2
+	bb := ComputeBoundingBox([]dxf.Entity{txt}, nil)
+	if bb.MaxX < 6 || bb.MaxY < 2 || bb.MinY > -0.5 || bb.MinX != 0 {
+		t.Errorf("TEXT bbox = %+v, want about (0,-0.6)-(8,2)", bb)
+	}
+
+	mt := dxf.NewMText()
+	mt.Text = `ONE\PTWO`
+	mt.InitialTextHeight = 1
+	mt.AttachmentPoint = dxf.AttachmentPointMiddleCenter
+	bb = ComputeBoundingBox([]dxf.Entity{mt}, nil)
+	if !(bb.MinX < -1 && bb.MaxX > 1 && bb.MinY < -1 && bb.MaxY > 1) {
+		t.Errorf("centered two-line MTEXT bbox = %+v, want around the anchor", bb)
+	}
+
+	// Rotated 90°: the text runs up from the anchor.
+	txt.Rotation = 90
+	bb = ComputeBoundingBox([]dxf.Entity{txt}, nil)
+	if bb.MaxY < 6 || bb.MaxX > 0.7 {
+		t.Errorf("rotated TEXT bbox = %+v, want it to run up the Y axis", bb)
+	}
+}
+
 func TestMInsertArrayBBox(t *testing.T) {
 	blk := dxf.NewBlock()
 	blk.Name = "P"
