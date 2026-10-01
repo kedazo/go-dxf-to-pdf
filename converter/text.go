@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 // parseUnicodeEscape decodes a "\U+XXXX" escape at the start of s and returns

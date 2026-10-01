@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 // orphanedFontSpec matches an orphaned font spec fragment at the START of MText content,
@@ -481,10 +481,10 @@ func resolveStyle(entity dxf.Entity, layers map[string]dxf.Layer, ctx drawCtx) (
 	}
 
 	var lw float64
-	switch v := int16(entity.LineWeight()); {
-	case v == -1: // ByBlock
+	switch v := entity.LineWeight(); {
+	case v == dxf.LineWeightByBlock:
 		lw = ctx.lw
-	case v == -2 && hasLayer: // ByLayer
+	case v == dxf.LineWeightByLayer && hasLayer:
 		lw = LineWeightToMM(layer.LineWeight)
 	default:
 		lw = LineWeightToMM(entity.LineWeight())
@@ -666,9 +666,10 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 			expand(m.mul(ocsAffine(e.Normal, e.Location.Z)), e.Location.X, e.Location.Y)
 		}
 	case *dxf.Hatch:
-		for _, poly := range hatchPolygons(e) {
+		om := m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation()))
+		for _, poly := range hatchPolygons(e, 0) {
 			for _, v := range poly {
-				expand(m, v[0], v[1])
+				expand(om, v[0], v[1])
 			}
 		}
 
@@ -788,28 +789,32 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		if !enableHatch {
 			break
 		}
+		// Boundaries and pattern lines are in the hatch's OCS.
+		om := m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation()))
+		// Paper-size based tolerances: curves flattened to within 0.05 mm,
+		// dots drawn ~0.15 mm long, whatever the scale.
+		pageScale := r.transform.Scale * om.linearScale()
+		tolerance, dotLen := 0.0, 0.15
+		if pageScale > 0 {
+			tolerance, dotLen = 0.05/pageScale, 0.15/pageScale
+		}
 		if e.SolidFill {
-			polys := hatchPolygons(e)
+			polys := hatchPolygons(e, tolerance)
 			world := make([][][2]float64, len(polys))
 			for i, poly := range polys {
 				world[i] = make([][2]float64, len(poly))
 				for j, v := range poly {
-					x, y := m.apply(v[0], v[1])
+					x, y := om.apply(v[0], v[1])
 					world[i][j] = [2]float64{x, y}
 				}
 			}
-			r.FillPolygons(world, rgb)
+			r.FillPolygons(world, hatchFillColor(e, rgb))
 		} else if len(e.PatternLines) > 0 {
 			r.SetStyle(rgb, 0.05) // thin lines for hatch fill
-			// Dots are drawn ~0.15 mm long on paper, whatever the scale.
-			dotLen := 0.15
-			if s := r.transform.Scale * m.linearScale(); s > 0 {
-				dotLen /= s
-			}
-			lines := generateHatchFillLines(e, dotLen)
+			lines := generateHatchFillLines(e, dotLen, tolerance)
 			for _, seg := range lines {
-				x1, y1 := m.apply(seg[0], seg[1])
-				x2, y2 := m.apply(seg[2], seg[3])
+				x1, y1 := om.apply(seg[0], seg[1])
+				x2, y2 := om.apply(seg[2], seg[3])
 				r.DrawLine(x1, y1, x2, y2)
 			}
 		}

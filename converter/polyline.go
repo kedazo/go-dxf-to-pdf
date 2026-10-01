@@ -1,7 +1,7 @@
 package converter
 
 import (
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 // polylineEdge is one drawable edge of a POLYLINE, in the entity's own
@@ -14,9 +14,9 @@ type polylineEdge struct {
 
 // polylineEdges flattens a POLYLINE into its visible edges. It understands the
 // three POLYLINE flavours:
-//   - polyface meshes (flag 64): vertex records hold the coordinates, face
-//     records (location 0,0,0) hold 1-based vertex indices; a negative index
-//     marks an invisible edge. Edges shared by adjacent faces are emitted once.
+//   - polyface meshes (flag 64): faces come from the parser's PolyfaceFaces
+//     (face records sit at 0,0,0 and must not be drawn as vertices); hidden
+//     edges are skipped and edges shared by adjacent faces are emitted once.
 //   - 3D polygon meshes (flag 16): an M×N vertex grid, optionally closed in
 //     the M and/or N direction.
 //   - plain 2D/3D polylines, including the closing edge for closed ones and
@@ -64,52 +64,25 @@ func simplePolylineEdges(p *dxf.Polyline) []polylineEdge {
 }
 
 func polyfaceEdges(p *dxf.Polyline) []polylineEdge {
-	// Both record kinds carry flag 128 ("polyface"); coordinate vertices also
-	// carry 64 (192 total), face records don't.
-	const meshVertexFlag = 64
-	var points []dxf.Point
-	var faces [][4]int
-	for _, v := range p.Vertices {
-		if v.Flags&meshVertexFlag != 0 {
-			points = append(points, v.Location)
-		} else {
-			faces = append(faces, [4]int{
-				v.PolyfaceMeshVertexIndex1, v.PolyfaceMeshVertexIndex2,
-				v.PolyfaceMeshVertexIndex3, v.PolyfaceMeshVertexIndex4,
-			})
-		}
-	}
-
 	type edgeKey struct{ a, b int }
 	seen := make(map[edgeKey]bool)
 	var edges []polylineEdge
-	for _, f := range faces {
-		// A face has 3 or 4 corners; index 0 means "unused corner".
-		idx := f[:]
-		if f[3] == 0 {
-			idx = f[:3]
-		}
-		for i := range idx {
-			from, to := idx[i], idx[(i+1)%len(idx)]
-			if from <= 0 {
-				continue // invisible edge (negative) or missing corner
-			}
-			a, b := from, to
-			if b < 0 {
-				b = -b
-			}
-			if b == 0 || a > len(points) || b > len(points) || a == b {
+	for _, f := range p.PolyfaceFaces() {
+		n := len(f.Indices)
+		for i := range n {
+			if !f.EdgeVisible[i] {
 				continue
 			}
-			k := edgeKey{a, b}
-			if a > b {
-				k = edgeKey{b, a}
+			a, b := f.Indices[i], f.Indices[(i+1)%n]
+			if a == b {
+				continue
 			}
+			k := edgeKey{min(a, b), max(a, b)}
 			if seen[k] {
-				continue
+				continue // shared by adjacent faces
 			}
 			seen[k] = true
-			pa, pb := points[a-1], points[b-1]
+			pa, pb := f.Points[i], f.Points[(i+1)%n]
 			edges = append(edges, polylineEdge{X1: pa.X, Y1: pa.Y, X2: pb.X, Y2: pb.Y})
 		}
 	}
@@ -117,11 +90,12 @@ func polyfaceEdges(p *dxf.Polyline) []polylineEdge {
 }
 
 func polygonMeshEdges(p *dxf.Polyline) []polylineEdge {
-	m, n := p.PolygonMeshMVertexCount, p.PolygonMeshNVertexCount
-	if m <= 0 || n <= 0 || m*n > len(p.Vertices) {
+	grid := p.PolygonMeshGrid()
+	if grid == nil {
 		return simplePolylineEdges(p)
 	}
-	at := func(i, j int) dxf.Point { return p.Vertices[i*n+j].Location }
+	m, n := len(grid), len(grid[0])
+	at := func(i, j int) dxf.Point { return grid[i][j] }
 	closedM := p.IsClosed()
 	closedN := p.IsPolygonMeshClosedInNDirection()
 

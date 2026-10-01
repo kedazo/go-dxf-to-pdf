@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"unicode/utf8"
 
-	dxf "github.com/ixmilia/dxf-go"
-	"golang.org/x/text/encoding/charmap"
+	dxf "github.com/kedazo/dxf-go"
+	"golang.org/x/text/encoding"
 )
 
 type Options struct {
@@ -165,121 +164,44 @@ func Convert(inputPath, outputPath string, opts Options) (*Result, error) {
 
 // ConvertReader converts a DXF from a reader to a PDF writer.
 func ConvertReader(r io.Reader, pdfPath string, opts Options) (*Result, error) {
-	// The DXF parser reads byte by byte, so parse from memory.
+	// The encoding scan and the parse both need the data, so keep it.
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("reading DXF: %w", err)
 	}
-	drawing, err := parseDxfData(data)
+	hints, err := sniffDxfEncoding(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("reading DXF: %w", err)
+	}
+	var enc encoding.Encoding = encoding.Nop
+	if cm := hints.fallbackEncoding(); cm != nil {
+		enc = cm
+	}
+	drawing, err := dxf.ReadFromReaderWithEncoding(bytes.NewReader(data), enc)
 	if err != nil {
 		return nil, fmt.Errorf("reading DXF: %w", err)
 	}
 	return convertDrawing(&drawing, pdfPath, opts)
 }
 
-// readDxfFile reads a DXF file, auto-detecting the text encoding.
+// readDxfFile reads a DXF file, streaming it through the parser. Text
+// decoding is left to the parser except for the cases fallbackEncoding
+// covers (DXF files from Central/Eastern European CAD software are often
+// Windows-1250 without saying so properly).
 func readDxfFile(path string) (dxf.Drawing, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return dxf.Drawing{}, err
 	}
-	return parseDxfData(data)
-}
-
-// parseDxfData parses DXF bytes. DXF files from Central/Eastern European CAD
-// software often use Windows-1250; we detect this by checking for
-// $DWGCODEPAGE or high bytes, and convert to UTF-8 first.
-func parseDxfData(data []byte) (dxf.Drawing, error) {
-	// Detect encoding from $DWGCODEPAGE header or presence of high bytes with c238 markers
-	enc := detectDxfEncoding(data)
-	if enc != nil {
-		var err error
-		data, err = enc.NewDecoder().Bytes(data)
-		if err != nil {
-			return dxf.Drawing{}, fmt.Errorf("decoding DXF text: %w", err)
-		}
-	}
-
-	drawing, err := dxf.ReadFromReader(bytes.NewReader(data))
+	hints, err := sniffDxfEncoding(f)
+	f.Close()
 	if err != nil {
-		return drawing, err
+		return dxf.Drawing{}, err
 	}
-	if parserLeaksHatchSeeds() {
-		trimLeakedHatchSeeds(&drawing, scanHatchSeedCounts(data))
+	if cm := hints.fallbackEncoding(); cm != nil {
+		return dxf.ReadFileWithEncoding(path, cm)
 	}
-	return drawing, nil
-}
-
-// detectDxfEncoding checks the raw DXF bytes for encoding hints.
-// Returns nil if the file appears to be UTF-8 or ASCII.
-func detectDxfEncoding(data []byte) *charmap.Charmap {
-	// If the file is already valid UTF-8 with non-ASCII content, skip conversion.
-	// Some DXF exporters (e.g. dwg2dxf from LibreDWG) write UTF-8 but declare
-	// $DWGCODEPAGE as ANSI_1250 — converting would double-encode.
-	hasHigh := !isASCIIOnly(data)
-	if hasHigh && utf8.Valid(data) {
-		return nil
-	}
-
-	// Check for $DWGCODEPAGE header
-	if idx := bytes.Index(data, []byte("$DWGCODEPAGE")); idx >= 0 {
-		// Look for the codepage value (next non-blank value after group code 3);
-		// it sits within the next few lines, so only look at a small window.
-		window := data[idx:min(idx+256, len(data))]
-		if cp := extractCodepage(string(window)); cp != "" {
-			switch cp {
-			case "ANSI_1250":
-				return charmap.Windows1250
-			case "ANSI_1251":
-				return charmap.Windows1251
-			case "ANSI_1252":
-				return charmap.Windows1252
-			case "ANSI_1253":
-				return charmap.Windows1253
-			case "ANSI_1254":
-				return charmap.Windows1254
-			case "ANSI_1255":
-				return charmap.Windows1255
-			case "ANSI_1256":
-				return charmap.Windows1256
-			case "ANSI_1257":
-				return charmap.Windows1257
-			}
-		}
-	}
-
-	// Fallback: if file has high bytes and contains c238 MText markers, assume Windows-1250
-	if hasHigh && bytes.Contains(data, []byte("c238")) {
-		return charmap.Windows1250
-	}
-
-	return nil
-}
-
-// isASCIIOnly returns true if data contains only bytes < 0x80.
-func isASCIIOnly(data []byte) bool {
-	for _, b := range data {
-		if b >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
-// extractCodepage extracts the codepage value from text starting at $DWGCODEPAGE.
-func extractCodepage(s string) string {
-	// Format: $DWGCODEPAGE\n  3\nANSI_1250\n
-	lines := bytes.Split([]byte(s), []byte{'\n'})
-	for i := 0; i < len(lines)-2; i++ {
-		trimmed := bytes.TrimSpace(lines[i])
-		if string(trimmed) == "$DWGCODEPAGE" {
-			// Next line should be group code 3, line after is the value
-			if i+2 < len(lines) {
-				return string(bytes.TrimSpace(lines[i+2]))
-			}
-		}
-	}
-	return ""
+	return dxf.ReadFile(path)
 }
 
 func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result, error) {

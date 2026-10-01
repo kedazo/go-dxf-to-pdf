@@ -3,7 +3,7 @@ package converter
 import (
 	"math"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 // affine is a 2D affine transform:

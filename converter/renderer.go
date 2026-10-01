@@ -172,13 +172,22 @@ func (r *Renderer) flush() {
 		return
 	}
 	if r.clip != nil {
-		// Path.Clip only handles straight segments.
-		p = p.Flatten(canvas.Tolerance).Clip(r.clip.X0, r.clip.Y0, r.clip.X1, r.clip.Y1)
-		if p.Empty() {
+		if p = clipPath(p, *r.clip); p.Empty() {
 			return
 		}
 	}
 	r.ctx.DrawPath(0, 0, p)
+}
+
+// clipPath clips a (multi-subpath) stroke path to a rectangle. Path.Clip only
+// handles straight segments, and it joins consecutive subpaths that are both
+// inside with a LineTo, so each subpath is flattened and clipped on its own.
+func clipPath(p *canvas.Path, c canvas.Rect) *canvas.Path {
+	clipped := &canvas.Path{}
+	for _, sp := range p.Flatten(canvas.Tolerance).Split() {
+		clipped = clipped.Append(sp.Clip(c.X0, c.Y0, c.X1, c.Y1))
+	}
+	return clipped
 }
 
 // outsideClip reports whether the page point (px, py), grown by pad mm in

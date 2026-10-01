@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 // addLine appends a LINE on the given layer. Coordinates are in millimeters

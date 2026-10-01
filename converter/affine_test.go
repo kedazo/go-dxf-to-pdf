@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
@@ -150,7 +150,7 @@ func TestResolveStyleInheritance(t *testing.T) {
 	bb := dxf.NewLine()
 	bb.SetLayer("0")
 	bb.SetColor(dxf.ByBlock())
-	bb.SetLineWeight(dxf.LineWeight(-1))
+	bb.SetLineWeight(dxf.LineWeightByBlock)
 	if rgb, lw := resolveStyle(bb, layers, ctx); rgb != (RGB{255, 0, 0}) || !near(lw, 0.5) {
 		t.Errorf("ByBlock style = %v %v, want red 0.5", rgb, lw)
 	}

@@ -3,7 +3,8 @@ package converter
 import (
 	"testing"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
+	"github.com/tdewolff/canvas"
 )
 
 func TestCullEntities(t *testing.T) {
@@ -43,6 +44,22 @@ func TestStrokeBatchingAcrossFlushes(t *testing.T) {
 	}
 	if err := r.Save(t.TempDir()+"/out.pdf", "pdf", 0, false); err != nil {
 		t.Fatalf("Save: %v", err)
+	}
+}
+
+// Separate strokes in one batch must stay separate after clipping (canvas'
+// Path.Clip would join them with a stray line).
+func TestClipPathKeepsSubpathsSeparate(t *testing.T) {
+	p := &canvas.Path{}
+	p.MoveTo(1, 1)
+	p.LineTo(2, 1)
+	p.MoveTo(5, 5)
+	p.LineTo(6, 5)
+	p.MoveTo(-5, 3) // crosses the left edge
+	p.LineTo(3, 3)
+	got := clipPath(p, canvas.Rect{X0: 0, Y0: 0, X1: 10, Y1: 10}).String()
+	if want := "M1 1L2 1M5 5L6 5M0 3L3 3"; got != want {
+		t.Errorf("clipped = %s, want %s", got, want)
 	}
 }
 

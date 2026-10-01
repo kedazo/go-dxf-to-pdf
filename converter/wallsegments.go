@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 // WallSegmentsOptions controls the --emit-wall-segments mode: which file/layers

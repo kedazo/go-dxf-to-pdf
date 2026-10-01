@@ -1,12 +1,12 @@
 package converter
 
-import dxf "github.com/ixmilia/dxf-go"
+import dxf "github.com/kedazo/dxf-go"
 
 const defaultLineWidthMM = 0.25
 
 // LineWeightToMM converts a DXF LineWeight value to millimeters.
 // DXF line weights are stored in 1/100 mm units.
-// Special values: -3 (Standard), -2 (ByLayer), -1 (ByBlock).
+// Special values: -3 (Standard), -1 (ByLayer), -2 (ByBlock).
 func LineWeightToMM(lw dxf.LineWeight) float64 {
 	v := int16(lw)
 	if v <= 0 {
@@ -17,13 +17,12 @@ func LineWeightToMM(lw dxf.LineWeight) float64 {
 
 // ResolveLineWeight resolves ByLayer/ByBlock line weights.
 func ResolveLineWeight(entityLW, layerLW dxf.LineWeight) float64 {
-	v := int16(entityLW)
-	switch v {
-	case -3: // Standard
+	switch entityLW {
+	case dxf.LineWeightStandard:
 		return defaultLineWidthMM
-	case -2: // ByLayer
+	case dxf.LineWeightByLayer:
 		return LineWeightToMM(layerLW)
-	case -1: // ByBlock
+	case dxf.LineWeightByBlock:
 		return defaultLineWidthMM
 	default:
 		return LineWeightToMM(entityLW)

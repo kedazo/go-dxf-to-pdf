@@ -2,9 +2,10 @@ package converter
 
 import (
 	"math"
+	"strings"
 	"testing"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 func square(x0, y0, x1, y1 float64) [][2]float64 {
@@ -35,6 +36,41 @@ func TestHatchHoleStaysEmpty(t *testing.T) {
 	}
 }
 
+// Lines that touch a boundary vertex or run along an edge must keep the
+// even-odd pairing intact for the rest of the line.
+func TestLineIntervalsDegenerateContacts(t *testing.T) {
+	near := func(got [][2]float64, want [][2]float64) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range want {
+			if math.Abs(got[i][0]-want[i][0]) > 1e-9 || math.Abs(got[i][1]-want[i][1]) > 1e-9 {
+				return false
+			}
+		}
+		return true
+	}
+	// U shape: notch x 10..20 from y=10 up; the line y=10 runs along the
+	// notch floor. Both outer parts must survive.
+	u := [][2]float64{{0, 0}, {30, 0}, {30, 20}, {20, 20}, {20, 10}, {10, 10}, {10, 20}, {0, 20}}
+	if got := lineIntervals(0, 10, 1, 0, [][][2]float64{u}); !near(got, [][2]float64{{0, 10}, {20, 30}}) {
+		t.Errorf("U floor: %v", got)
+	}
+	// A diamond island whose bottom apex touches the line y=4 must not split
+	// the line at all.
+	outer := square(0, 0, 20, 10)
+	diamond := [][2]float64{{10, 4}, {12, 6}, {10, 8}, {8, 6}}
+	if got := lineIntervals(0, 4, 1, 0, [][][2]float64{outer, diamond}); !near(got, [][2]float64{{0, 20}}) {
+		t.Errorf("touching island: %v", got)
+	}
+	// A notch apex pointing down onto the line from above (V cut into the top
+	// edge reaching y=4) touches but does not cross.
+	v := [][2]float64{{100, 0}, {110, 0}, {110, 8}, {106, 8}, {105, 4}, {104, 8}, {100, 8}}
+	if got := lineIntervals(0, 4, 1, 0, [][][2]float64{v}); !near(got, [][2]float64{{100, 110}}) {
+		t.Errorf("notch apex: %v", got)
+	}
+}
+
 func TestHatchSpacingNotRescaled(t *testing.T) {
 	// The offset (0, 0.5) is already in drawing units: 0..10 → 21 lines.
 	pl := dxf.HatchPatternLine{Angle: 0, OffsetY: 0.5}
@@ -45,6 +81,47 @@ func TestHatchSpacingNotRescaled(t *testing.T) {
 	}
 	if len(ys) < 19 || len(ys) > 21 {
 		t.Errorf("got %d distinct lines, want ~20 (spacing 0.5)", len(ys))
+	}
+}
+
+func parseHatch(t *testing.T, body string) *dxf.Hatch {
+	t.Helper()
+	s := "0\nSECTION\n2\nENTITIES\n0\nHATCH\n5\nA1\n100\nAcDbEntity\n8\n0\n100\nAcDbHatch\n" +
+		"10\n0.0\n20\n0.0\n30\n0.0\n210\n0.0\n220\n0.0\n230\n1.0\n" + body + "0\nENDSEC\n0\nEOF\n"
+	d, err := dxf.ReadFromReader(strings.NewReader(s))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, e := range d.Entities {
+		if h, ok := e.(*dxf.Hatch); ok {
+			return h
+		}
+	}
+	t.Fatal("no hatch parsed")
+	return nil
+}
+
+// Edge-type boundary: a half disc (line + CCW arc). The arc must be
+// flattened along the curve, its center must not become a vertex.
+func TestHatchEdgeBoundaryWithArc(t *testing.T) {
+	h := parseHatch(t, "2\nSOLID\n70\n1\n71\n0\n91\n1\n92\n1\n93\n2\n"+
+		"72\n1\n10\n-10.0\n20\n0.0\n11\n10.0\n21\n0.0\n"+ // line (-10,0)→(10,0)
+		"72\n2\n10\n0.0\n20\n0.0\n40\n10.0\n50\n0.0\n51\n180.0\n73\n1\n"+ // arc 0°→180° r=10
+		"97\n0\n75\n0\n76\n1\n98\n1\n10\n0.0\n20\n5.0\n")
+	polys := hatchPolygons(h, 0.01)
+	if len(polys) != 1 || len(polys[0]) < 10 {
+		t.Fatalf("polygons = %v, want one flattened half disc", polys)
+	}
+	for _, v := range polys[0] {
+		if r := math.Hypot(v[0], v[1]); v[1] > 1e-9 && math.Abs(r-10) > 0.02 {
+			t.Errorf("vertex %v is off the arc (r=%v)", v, r)
+		}
+	}
+	// The seed point (0,5) belongs to the seed list, not the boundary.
+	for _, v := range polys[0] {
+		if v == [2]float64{0, 5} {
+			t.Errorf("seed point leaked into the boundary: %v", polys[0])
+		}
 	}
 }
 

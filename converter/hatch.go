@@ -4,7 +4,7 @@ import (
 	"math"
 	"sort"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 // enableHatch controls whether HATCH entities are rendered.
@@ -17,27 +17,68 @@ const (
 	maxDashesPerInterval   = 100000
 )
 
-// hatchPolygons returns the hatch boundary loops that can enclose an area.
-func hatchPolygons(h *dxf.Hatch) [][][2]float64 {
+// Boundary path flags (group 92).
+const (
+	hatchPathExternal  = 1
+	hatchPathOutermost = 16
+)
+
+// hatchPolygons returns the hatch boundary loops that can enclose an area,
+// in the hatch's object coordinate system. Curved edges and bulges are
+// flattened with the given tolerance (drawing units; <= 0 = relative).
+// With the "outermost" and "entire" island styles only the outer loops
+// take part, so inner islands are filled over as AutoCAD does.
+func hatchPolygons(h *dxf.Hatch, tolerance float64) [][][2]float64 {
+	keep := func(pathType int) bool { return true }
+	switch h.Style {
+	case dxf.HatchStyleOutermost:
+		keep = func(pathType int) bool { return pathType&(hatchPathExternal|hatchPathOutermost) != 0 }
+	case dxf.HatchStyleEntire:
+		keep = func(pathType int) bool { return pathType&hatchPathExternal != 0 }
+	}
+	// If no loop carries the flags the style relies on, fall back to all.
+	anyKept := false
+	for i := range h.Paths {
+		anyKept = anyKept || keep(h.Paths[i].PathType)
+	}
+
 	polys := make([][][2]float64, 0, len(h.Paths))
-	for _, p := range h.Paths {
-		if len(p.Vertices) >= 3 {
-			polys = append(polys, p.Vertices)
+	for i := range h.Paths {
+		if anyKept && !keep(h.Paths[i].PathType) {
+			continue
+		}
+		if poly, _ := h.Paths[i].Polygon(tolerance); len(poly) >= 3 {
+			polys = append(polys, poly)
 		}
 	}
 	return polys
 }
 
+// hatchFillColor returns the color for a solid hatch. Gradient fills are
+// approximated by their first color stop; otherwise the entity color is used.
+func hatchFillColor(h *dxf.Hatch, entity RGB) RGB {
+	if g := h.Gradient; g != nil && g.IsGradient && len(g.Colors) > 0 {
+		c := g.Colors[0]
+		switch {
+		case c.TrueColor != 0:
+			return RGB{uint8(c.TrueColor >> 16), uint8(c.TrueColor >> 8), uint8(c.TrueColor)}
+		case c.Color > 0 && c.Color < 256:
+			return ACIToRGB(int16(c.Color))
+		}
+	}
+	return entity
+}
+
 // generateHatchFillLines generates all fill lines for a pattern hatch.
-// Returns line segments in the hatch's coordinates as [x1, y1, x2, y2].
+// Returns line segments in the hatch's object coordinates as [x1, y1, x2, y2].
 // All boundary loops are clipped together with the even-odd rule, so islands
 // and holes stay empty. dotLen is the length used for zero-length (dot)
-// dashes, in the same units.
-func generateHatchFillLines(h *dxf.Hatch, dotLen float64) [][4]float64 {
+// dashes and tolerance the curve flattening tolerance, in the same units.
+func generateHatchFillLines(h *dxf.Hatch, dotLen, tolerance float64) [][4]float64 {
 	if h.SolidFill || len(h.PatternLines) == 0 {
 		return nil
 	}
-	polys := hatchPolygons(h)
+	polys := hatchPolygons(h, tolerance)
 	if len(polys) == 0 {
 		return nil
 	}
@@ -106,29 +147,28 @@ func patternLineSegments(polys [][][2]float64, pl dxf.HatchPatternLine, dotLen f
 
 // lineIntervals intersects the infinite line origin + t·dir with all boundary
 // loops and returns the parameter intervals inside them (even-odd rule).
+//
+// An edge counts as a crossing only if its end points lie strictly on
+// different sides of the line, with points on the line counted as below it.
+// This consistent tie-break keeps the even-odd pairing right when the line
+// touches a vertex or runs along an edge.
 func lineIntervals(ox, oy, dirX, dirY float64, polys [][][2]float64) [][2]float64 {
 	var params []float64
 	for _, poly := range polys {
 		n := len(poly)
+		// signed distance of a vertex from the line (left = positive)
+		side := func(v [2]float64) float64 { return dirX*(v[1]-oy) - dirY*(v[0]-ox) }
 		for i := 0; i < n; i++ {
-			j := (i + 1) % n
-			ex := poly[j][0] - poly[i][0]
-			ey := poly[j][1] - poly[i][1]
-
-			// Solve: o + t·dir = poly[i] + s·e
-			denom := dirX*ey - dirY*ex
-			if math.Abs(denom) < 1e-12 {
-				continue // parallel
+			a, b := poly[i], poly[(i+1)%n]
+			sa, sb := side(a), side(b)
+			if (sa > 0) == (sb > 0) {
+				continue
 			}
-			dx := poly[i][0] - ox
-			dy := poly[i][1] - oy
-			t := (dx*ey - dy*ex) / denom
-			s := (dx*dirY - dy*dirX) / denom
-
-			// Half-open edge test so a line through a shared vertex is counted once.
-			if s >= 0 && s < 1 {
-				params = append(params, t)
-			}
+			// crossing point a + (b-a)·f, as a parameter along the line
+			f := sa / (sa - sb)
+			px := a[0] + (b[0]-a[0])*f
+			py := a[1] + (b[1]-a[1])*f
+			params = append(params, (px-ox)*dirX+(py-oy)*dirY)
 		}
 	}
 	if len(params) < 2 {
@@ -138,9 +178,16 @@ func lineIntervals(ox, oy, dirX, dirY float64, polys [][][2]float64) [][2]float6
 
 	var out [][2]float64
 	for i := 0; i+1 < len(params); i += 2 {
-		if params[i+1]-params[i] > 1e-10 {
-			out = append(out, [2]float64{params[i], params[i+1]})
+		if params[i+1]-params[i] <= 1e-10 {
+			continue
 		}
+		// A line touching a vertex from inside splits at a single point;
+		// join such pieces back together.
+		if last := len(out) - 1; last >= 0 && params[i]-out[last][1] <= 1e-10 {
+			out[last][1] = params[i+1]
+			continue
+		}
+		out = append(out, [2]float64{params[i], params[i+1]})
 	}
 	return out
 }

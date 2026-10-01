@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 func TestParsePaperSize(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	dxf "github.com/ixmilia/dxf-go"
+	dxf "github.com/kedazo/dxf-go"
 )
 
 type PaperSize struct {

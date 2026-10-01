@@ -4,13 +4,9 @@ go 1.26.0
 
 toolchain go1.26.8
 
-// Fork of ixmilia/dxf-go with tolerant HEADER parsing (skips malformed header
-// variables instead of aborting them) plus the existing HATCH/charset patches.
-replace github.com/ixmilia/dxf-go => github.com/kedazo/dxf-go v0.2.2
-
 require (
 	github.com/alecthomas/kong v1.16.1
-	github.com/ixmilia/dxf-go v0.0.0-00010101000000-000000000000
+	github.com/kedazo/dxf-go v0.2.3-0.20261001081937-9ae8ea34d6cb
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	golang.org/x/text v0.42.0
 )
