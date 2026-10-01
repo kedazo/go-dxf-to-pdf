@@ -13,8 +13,10 @@ type MTextStyle struct {
 	Italic         bool
 	Height         float64 // 0 = use default; absolute height in drawing units
 	HeightRelative float64 // 0 = not set; multiplier of the (default or absolute) height (from \H0.66x;)
-	WidthFactor    float64 // 0 = use default (1.0)
-	ObliqueAngle   float64 // degrees
+	WidthFactor    float64 // absolute if HasWidthFactor, else a multiplier of the text style's (0 = 1)
+	ObliqueAngle   float64 // degrees; replaces the text style's slant if HasObliqueAngle
+	HasWidthFactor bool    // an absolute \W is in effect (\W1; cancels a condensed style)
+	HasOblique     bool    // \Q is in effect (\Q0; cancels a slanted style)
 	Tracking       float64 // \T: character advance factor (0 or 1 = normal)
 	ColorR         int
 	ColorG         int
@@ -70,6 +72,8 @@ func ParseMText(s string) []MTextSegment {
 
 			VerticalAlignment: run.VerticalAlignment,
 			Paragraph:         run.Paragraph,
+			HasWidthFactor:    run.HasWidthFactor,
+			HasOblique:        run.HasObliqueAngle,
 		}
 		if run.HeightFactor != 1 {
 			style.HeightRelative = run.HeightFactor

@@ -294,6 +294,16 @@ func TestMTextStyleWidthAndSlant(t *testing.T) {
 	if w := width("ABCDEF", textStyle{width: 1, oblique: 15}); w <= plain {
 		t.Errorf("slanted text is %v mm wide, want wider than %v", w, plain)
 	}
+	// An explicit \W1 and \Q0 cancel the style's; a relative \W multiplies it.
+	if w := width(`\W1;ABCDEF`, textStyle{width: 0.5}); math.Abs(w-plain) > plain*0.05 {
+		t.Errorf("\\W1 in a 0.5 style: %v mm, want about %v", w, plain)
+	}
+	if w := width(`\W2x;ABCDEF`, textStyle{width: 0.5}); math.Abs(w-plain) > plain*0.05 {
+		t.Errorf("\\W2x in a 0.5 style: %v mm, want about %v", w, plain)
+	}
+	if w := width(`\Q0;ABCDEF`, textStyle{width: 1, oblique: 15}); math.Abs(w-plain) > plain*0.01 {
+		t.Errorf("\\Q0 in a slanted style: %v mm, want %v", w, plain)
+	}
 }
 
 // Paragraph codes: explicit tab stops (in text heights), centring in the box,

@@ -1182,15 +1182,16 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		if seg.Style.HasColor {
 			textColor = color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
 		}
-		// Without \W and \Q the text style's width factor and slant apply.
+		// Without \W and \Q the text style's width factor and slant apply; a
+		// relative \W…x multiplies the style's factor.
 		width, oblique := seg.Style.WidthFactor, seg.Style.ObliqueAngle
-		if width <= 0 || width == 1 {
-			width = style.width
-		}
 		if width <= 0 {
 			width = 1
 		}
-		if oblique == 0 {
+		if !seg.Style.HasWidthFactor && style.width > 0 {
+			width *= style.width
+		}
+		if !seg.Style.HasOblique {
 			oblique = style.oblique
 		}
 		look := r.lookWithFont(segFont, segFamily, width, oblique)
