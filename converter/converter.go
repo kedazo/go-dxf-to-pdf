@@ -411,6 +411,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 
 	renderer := NewRenderer(paper, landscape, margin, opts.FontDir)
 	totalPages := grid.Cols * grid.Rows
+	boxes := entityBoxes(drawing.Entities, blockMap)
 
 	for row := 0; row < grid.Rows; row++ {
 		for col := 0; col < grid.Cols; col++ {
@@ -432,9 +433,19 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 			t := NewTransform(tileBBox, effectiveScale, paper, margin, AlignTopLeft, landscape)
 			renderer.SetTransform(t)
 
+			// Only entities touching this tile (plus a little slack for line
+			// widths), clipped to the printable area.
+			slack := 5 / effectiveScale // 5 mm on paper, in drawing units
+			cullBox := BBox{
+				MinX: tileBBox.MinX - slack, MinY: tileBBox.MinY - slack,
+				MaxX: tileBBox.MaxX + slack, MaxY: tileBBox.MaxY + slack,
+			}
 			renderer.SetClipRect(margin, margin, printW, printH)
-			RenderEntities(renderer, drawing.Entities, layerMap, blockMap, layerFilter)
+			RenderEntities(renderer, cullEntities(drawing.Entities, boxes, cullBox), layerMap, blockMap, layerFilter)
 			renderer.ClipEnd()
+			if !opts.Transparent {
+				renderer.MaskOutside(margin, margin, printW, printH)
+			}
 
 			DrawCropMarks(renderer, margin, pw, ph)
 		}

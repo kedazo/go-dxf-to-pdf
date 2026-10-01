@@ -504,6 +504,30 @@ func ComputeBoundingBox(entities []dxf.Entity, blocks map[string]*dxf.Block) BBo
 	return bb
 }
 
+// entityBoxes returns the world bbox of every top-level entity. Entities
+// without a known extent get an empty bbox (see cullEntities).
+func entityBoxes(entities []dxf.Entity, blocks map[string]*dxf.Block) []BBox {
+	boxes := make([]BBox, len(entities))
+	for i, ent := range entities {
+		boxes[i] = NewBBox()
+		expandBBoxForEntity(&boxes[i], ent, blocks, identityAffine, 0)
+	}
+	return boxes
+}
+
+// cullEntities returns the entities whose bbox intersects box. Entities
+// without a known extent are kept, so culling never drops geometry.
+func cullEntities(entities []dxf.Entity, boxes []BBox, box BBox) []dxf.Entity {
+	out := make([]dxf.Entity, 0, len(entities))
+	for i, ent := range entities {
+		b := boxes[i]
+		if b.MinX > b.MaxX || (b.MaxX >= box.MinX && b.MinX <= box.MaxX && b.MaxY >= box.MinY && b.MinY <= box.MaxY) {
+			out = append(out, ent)
+		}
+	}
+	return out
+}
+
 // curve geometry shared by rendering and bbox computation
 
 // circleArcAxes returns the world center and conjugate semi-axes of a circle
@@ -640,6 +664,12 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 	case *dxf.Attribute:
 		if !e.IsInvisible() {
 			expand(m.mul(ocsAffine(e.Normal, e.Location.Z)), e.Location.X, e.Location.Y)
+		}
+	case *dxf.Hatch:
+		for _, poly := range hatchPolygons(e) {
+			for _, v := range poly {
+				expand(m, v[0], v[1])
+			}
 		}
 
 	default:

@@ -27,6 +27,7 @@ type Renderer struct {
 	pageH      float64
 	color      color.RGBA // current entity color (used for text)
 	capRatio   float64    // font cap height / em size, measured lazily
+	clip       *canvas.Rect // page-space clip rectangle (tiled output), nil = none
 }
 
 // DefaultFontDir returns the default font directory.
@@ -101,7 +102,26 @@ func (r *Renderer) drawLine(x1, y1, x2, y2 float64) {
 	p := &canvas.Path{}
 	p.MoveTo(x1, y1)
 	p.LineTo(x2, y2)
+	r.strokePath(p)
+}
+
+// strokePath draws a page-coordinate path, clipped to the clip rectangle
+// when one is set (tiled output).
+func (r *Renderer) strokePath(p *canvas.Path) {
+	if r.clip != nil {
+		p = p.Clip(r.clip.X0, r.clip.Y0, r.clip.X1, r.clip.Y1)
+		if p.Empty() {
+			return
+		}
+	}
 	r.ctx.DrawPath(0, 0, p)
+}
+
+// outsideClip reports whether the page point (px, py), grown by pad mm in
+// every direction, lies completely outside the clip rectangle.
+func (r *Renderer) outsideClip(px, py, pad float64) bool {
+	c := r.clip
+	return c != nil && (px+pad < c.X0 || px-pad > c.X1 || py+pad < c.Y0 || py-pad > c.Y1)
 }
 
 // DrawEllipticArc draws the curve c + u·cos(t) + v·sin(t) for t from t0 to t1
@@ -125,7 +145,7 @@ func (r *Renderer) DrawEllipticArc(cx, cy, ux, uy, vx, vy, t0, t1 float64) {
 	if math.Abs(sweep) >= 2*math.Pi-1e-9 {
 		p.Close()
 	}
-	r.ctx.DrawPath(0, 0, p)
+	r.strokePath(p)
 }
 
 func (r *Renderer) DrawPolyline(points [][2]float64, closed bool) {
@@ -140,7 +160,7 @@ func (r *Renderer) DrawPolyline(points [][2]float64, closed bool) {
 	if closed && len(points) > 2 {
 		p.Close()
 	}
-	r.ctx.DrawPath(0, 0, p)
+	r.strokePath(p)
 }
 
 func (r *Renderer) DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4 float64) {
@@ -182,6 +202,9 @@ func (r *Renderer) FillPolygons(polys [][][2]float64, col RGB) {
 func (r *Renderer) DrawPoint(x, y float64) {
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
+	if r.outsideClip(px, py, 0.2) {
+		return
+	}
 	p := canvas.Circle(0.2)
 	// Circle path is centered around (rx, ry) with radius 0.2
 	r.ctx.Push()
@@ -247,6 +270,9 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hA
 
 	face := r.textFace(scaledH, r.color, canvas.FontRegular)
 	textLine := canvas.NewTextLine(face, text, canvas.Left)
+	if r.outsideClip(px, py, textLine.Bounds().W()+2*scaledH) {
+		return
+	}
 	dx := -hAlign * textLine.Bounds().W()
 	dy := baselineShift(scaledH, face.Metrics().Descent, vAlign)
 
@@ -342,6 +368,18 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		firstBaseline = py - (n-1)*advance
 	}
 
+	maxW := 0.0
+	for _, items := range lines {
+		w := 0.0
+		for _, it := range items {
+			w += it.width
+		}
+		maxW = max(maxW, w)
+	}
+	if r.outsideClip(px, py, maxW+n*advance+2*defaultScaledH) {
+		return
+	}
+
 	if math.Abs(rotationDeg) > 0.01 {
 		r.ctx.Push()
 		r.ctx.ComposeView(canvas.Identity.RotateAbout(-rotationDeg, px, py))
@@ -374,7 +412,12 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				r.ctx.SetStrokeColor(it.col)
 				r.ctx.SetStrokeWidth(it.h * 0.07)
 				r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
-				r.drawLine(curX, curY+deco.dy, curX+it.width, curY+deco.dy)
+				// Drawn in the (possibly rotated) text frame, so not
+				// clipped against the page-space clip rect.
+				dp := &canvas.Path{}
+				dp.MoveTo(curX, curY+deco.dy)
+				dp.LineTo(curX+it.width, curY+deco.dy)
+				r.ctx.DrawPath(0, 0, dp)
 				r.ctx.Pop()
 			}
 
@@ -400,7 +443,7 @@ func (r *Renderer) DrawSpline(controlPoints [][2]float64, degree int, knots []fl
 	for i := 1; i < len(points); i++ {
 		p.LineTo(r.transform.X(points[i][0]), r.transform.Y(points[i][1]))
 	}
-	r.ctx.DrawPath(0, 0, p)
+	r.strokePath(p)
 }
 
 func (r *Renderer) DrawDebugBBox(bbox BBox) {
@@ -432,15 +475,41 @@ func (r *Renderer) AddPage() {
 	r.ctx.SetCoordSystem(canvas.CartesianIV)
 }
 
+// SetClipRect restricts subsequent drawing to a page-space rectangle.
+// Canvas has no clip state, so stroked paths are clipped geometrically and
+// points/text entirely outside are skipped; fills and text straddling the
+// edge are trimmed by MaskOutside for opaque output.
 func (r *Renderer) SetClipRect(x, y, w, h float64) {
-	// Canvas doesn't have a direct clip rect on context, so we use Push/Pop
-	// and will rely on the drawing being within bounds.
-	// For proper clipping, we'd need to intersect paths, but for tiling
-	// the content is already positioned to fit within the tile.
-	r.ctx.Push()
+	r.clip = &canvas.Rect{X0: x, Y0: y, X1: x + w, Y1: y + h}
 }
 
 func (r *Renderer) ClipEnd() {
+	r.clip = nil
+}
+
+// MaskOutside paints the page white outside the given page-space rectangle,
+// hiding whatever spilled over the printable area of a tile.
+func (r *Renderer) MaskOutside(x, y, w, h float64) {
+	r.ctx.Push()
+	r.ctx.SetFillColor(color.RGBA{255, 255, 255, 255})
+	r.ctx.SetStrokeColor(color.RGBA{0, 0, 0, 0})
+	for _, rc := range [][4]float64{
+		{0, 0, r.pageW, y},                       // top
+		{0, y + h, r.pageW, r.pageH},             // bottom
+		{0, y, x, y + h},                         // left
+		{x + w, y, r.pageW, y + h},               // right
+	} {
+		if rc[2] <= rc[0] || rc[3] <= rc[1] {
+			continue
+		}
+		p := &canvas.Path{}
+		p.MoveTo(rc[0], rc[1])
+		p.LineTo(rc[2], rc[1])
+		p.LineTo(rc[2], rc[3])
+		p.LineTo(rc[0], rc[3])
+		p.Close()
+		r.ctx.DrawPath(0, 0, p)
+	}
 	r.ctx.Pop()
 }
 
