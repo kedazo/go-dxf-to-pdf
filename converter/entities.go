@@ -359,8 +359,16 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 	case *dxf.ModelPoint:
 		expand(m, e.Location.X, e.Location.Y)
 	case *dxf.Leader:
-		for _, v := range e.Vertices {
+		pts := make([][2]float64, len(e.Vertices))
+		for i, v := range e.Vertices {
 			expand(m, v.X, v.Y)
+			pts[i] = [2]float64{v.X, v.Y}
+		}
+		if e.PathType == dxf.LeaderPathTypeSpline { // the curve stays within its control points
+			for _, c := range curveThrough(pts) {
+				expand(m, c[1][0], c[1][1])
+				expand(m, c[2][0], c[2][1])
+			}
 		}
 	case *dxf.Table:
 		expandBBoxForEntity(bb, tableInsert(e), blocks, ctx)

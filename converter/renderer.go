@@ -533,6 +533,19 @@ func (r *Renderer) DrawPolyline(points [][2]float64, closed bool) {
 	}
 }
 
+// DrawCurve draws connected cubic Béziers (start, two control points, end;
+// drawing coordinates) as one stroke.
+func (r *Renderer) DrawCurve(curves [][4][2]float64) {
+	if len(curves) == 0 {
+		return
+	}
+	t := r.transform
+	r.penTo(t.X(curves[0][0][0]), t.Y(curves[0][0][1]))
+	for _, c := range curves {
+		r.cubeTo(t.X(c[1][0]), t.Y(c[1][1]), t.X(c[2][0]), t.Y(c[2][1]), t.X(c[3][0]), t.Y(c[3][1]))
+	}
+}
+
 func (r *Renderer) DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4 float64) {
 	r.flush()
 	p := &canvas.Path{}

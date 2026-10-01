@@ -35,7 +35,15 @@ type mleaderLook struct {
 	textColor  dxf.ObjectColor
 	lineColor  dxf.ObjectColor
 	lineWeight dxf.LineWeight
+	lineType   int16 // mleaderLineInvisible, …Straight or …Spline
 }
+
+// MULTILEADER leader line types (MLEADERSTYLE group 173, MULTILEADER 170).
+const (
+	mleaderLineInvisible = 0
+	mleaderLineStraight  = 1
+	mleaderLineSpline    = 2
+)
 
 // mleaderLook returns the defaults of the MLEADERSTYLE with the handle.
 func (la *leaderArrows) mleaderLook(h dxf.Handle) (mleaderLook, bool) {
@@ -51,10 +59,14 @@ func (la *leaderArrows) mleaderLook(h dxf.Handle) (mleaderLook, bool) {
 func (la *leaderArrows) mleaderLookFor(e *dxf.MLeader) (look mleaderLook, ok bool) {
 	look, ok = la.mleaderLook(e.StyleHandle)
 	if !ok {
-		look = mleaderLook{textColor: dxf.ObjectColorByBlock, lineColor: dxf.ObjectColorByBlock, lineWeight: dxf.LineWeightByBlock}
+		look = mleaderLook{textColor: dxf.ObjectColorByBlock, lineColor: dxf.ObjectColorByBlock, lineWeight: dxf.LineWeightByBlock,
+			lineType: mleaderLineStraight}
 	}
 	if e.PropertyOverrides == 0 {
 		return look, ok
+	}
+	if e.IsOverridden(dxf.MLeaderOverrideLeaderLineType) {
+		look.lineType = e.LeaderLineType
 	}
 	if e.IsOverridden(dxf.MLeaderOverrideLeaderLineColor) {
 		look.lineColor = e.LeaderLineColor
@@ -139,6 +151,10 @@ func newLeaderArrows(d *dxf.Drawing) *leaderArrows {
 	la.textStyles = styleNames
 	la.mleaders = make(map[dxf.Handle]mleaderLook, len(d.MLeaderStyles))
 	for _, s := range d.MLeaderStyles {
+		lineType := s.LeaderLineType
+		if lineType == mleaderLineInvisible { // also what a missing 173 reads as
+			lineType = mleaderLineStraight
+		}
 		la.mleaders[s.Handle] = mleaderLook{
 			arrowBlock: recordNames[s.ArrowheadHandle],
 			arrowSize:  s.ArrowheadSize,
@@ -148,6 +164,7 @@ func newLeaderArrows(d *dxf.Drawing) *leaderArrows {
 			textColor:  s.TextColor,
 			lineColor:  s.LeaderLineColor,
 			lineWeight: s.LeaderLineWeight,
+			lineType:   lineType,
 		}
 	}
 	return la
@@ -172,6 +189,38 @@ func arrowAffine(tip, from dxf.Point, size float64) affine {
 	return translateAffine(tip.X, tip.Y).mul(rotateAffine(deg)).mul(scaleAffine(size, size))
 }
 
+// curveThrough returns the cubic Béziers of a smooth curve through the
+// points (a Catmull-Rom spline, ends with their chord as tangent), each as
+// start, two control points and end. It stands in for AutoCAD's spline
+// leaders, whose fit tangents aren't stored.
+func curveThrough(pts [][2]float64) [][4][2]float64 {
+	n := len(pts)
+	if n < 2 {
+		return nil
+	}
+	at := func(i int) [2]float64 { return pts[min(max(i, 0), n-1)] }
+	curves := make([][4][2]float64, 0, n-1)
+	for i := 0; i+1 < n; i++ {
+		p0, p1, p2, p3 := at(i-1), at(i), at(i+1), at(i+2)
+		curves = append(curves, [4][2]float64{
+			p1,
+			{p1[0] + (p2[0]-p0[0])/6, p1[1] + (p2[1]-p0[1])/6},
+			{p2[0] - (p3[0]-p1[0])/6, p2[1] - (p3[1]-p1[1])/6},
+			p2,
+		})
+	}
+	return curves
+}
+
+// drawLeaderPath draws a leader's path, straight or as a smooth curve.
+func drawLeaderPath(r *Renderer, pts [][2]float64, spline bool) {
+	if !spline || len(pts) < 3 {
+		r.DrawPolyline(pts, false)
+		return
+	}
+	r.DrawCurve(curveThrough(pts))
+}
+
 // renderLeader draws a LEADER's path and arrowhead.
 func renderLeader(r *Renderer, e *dxf.Leader, layers map[string]dxf.Layer, blocks map[string]*dxf.Block,
 	ctx drawCtx, rgb RGB) {
@@ -182,7 +231,7 @@ func renderLeader(r *Renderer, e *dxf.Leader, layers map[string]dxf.Layer, block
 		x, y := m.apply(v.X, v.Y)
 		pts[i] = [2]float64{x, y}
 	}
-	r.DrawPolyline(pts, false)
+	drawLeaderPath(r, pts, e.PathType == dxf.LeaderPathTypeSpline)
 
 	if !e.UseArrowheads || len(e.Vertices) < 2 {
 		return
@@ -285,6 +334,18 @@ func mleaderParts(e *dxf.MLeader, blockNames map[dxf.Handle]string, look *mleade
 	return paths, text, block
 }
 
+// mleaderDoglegs tells, for each path of mleaderParts, whether it ends with
+// a dogleg (which stays straight on spline leaders).
+func mleaderDoglegs(e *dxf.MLeader) []bool {
+	var doglegs []bool
+	for _, l := range e.Leaders {
+		for range l.Lines {
+			doglegs = append(doglegs, l.DoglegLength != 0)
+		}
+	}
+	return doglegs
+}
+
 // mleaderScale returns a MULTILEADER's overall scale (1 if unset).
 func mleaderScale(e *dxf.MLeader) float64 {
 	if e.Scale > 0 {
@@ -320,13 +381,22 @@ func renderMLeader(r *Renderer, e *dxf.MLeader, layers map[string]dxf.Layer, blo
 	setLineStyle := func() { r.SetDashedStyle(lineRGB, lw, offset, dashes) }
 	setLineStyle()
 	paths, text, block := mleaderParts(e, r.leaderArrows.blockNames(), lookPtr)
-	for _, path := range paths {
+	if look.lineType == mleaderLineInvisible {
+		paths = nil
+	}
+	doglegs := mleaderDoglegs(e)
+	for k, path := range paths {
 		pts := make([][2]float64, len(path))
 		for i, p := range path {
 			pts[i][0], pts[i][1] = m.apply(p.X, p.Y)
 		}
 		r.BreakPath()
-		r.DrawPolyline(pts, false)
+		if look.lineType == mleaderLineSpline && k < len(doglegs) && doglegs[k] && len(pts) > 2 {
+			drawLeaderPath(r, pts[:len(pts)-1], true) // the dogleg stays straight
+			r.DrawPolyline(pts[len(pts)-2:], false)
+		} else {
+			drawLeaderPath(r, pts, look.lineType == mleaderLineSpline)
+		}
 		if len(path) < 2 || arrowSize <= 0 {
 			continue
 		}

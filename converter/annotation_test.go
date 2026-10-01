@@ -2,6 +2,7 @@ package converter
 
 import (
 	"image"
+	"strings"
 	"testing"
 
 	dxf "github.com/kedazo/dxf-go"
@@ -40,6 +41,31 @@ func TestLeaderArrows(t *testing.T) {
 	assertPoint(t, "tip", x, y, 5, 5)
 	x, y = m.apply(-1, 0)
 	assertPoint(t, "body", x, y, 5, 3)
+}
+
+// Spline leaders are smooth curves through their vertices.
+func TestCurveThrough(t *testing.T) {
+	pts := [][2]float64{{0, 0}, {10, 10}, {20, 0}}
+	curves := curveThrough(pts)
+	if len(curves) != 2 || curves[0][0] != pts[0] || curves[0][3] != pts[1] || curves[1][3] != pts[2] {
+		t.Fatalf("curves = %v, want two through the points", curves)
+	}
+	// Smooth at the middle vertex: the control points on either side of it
+	// are collinear with it (here level, at the apex).
+	if curves[0][2][1] != 10 || curves[1][1][1] != 10 {
+		t.Errorf("tangent at the apex: %v and %v, want level", curves[0][2], curves[1][1])
+	}
+
+	leader := dxf.NewLeader()
+	leader.PathType = dxf.LeaderPathTypeSpline
+	leader.Vertices = []dxf.Point{{X: 0, Y: 0}, {X: 10, Y: 10}, {X: 20, Y: 0}}
+	paper := PaperSize{Width: 100, Height: 100}
+	r := NewRenderer(paper, false, 0, "")
+	r.SetTransform(NewTransform(BBox{MaxX: 100, MaxY: 100}, 1, paper, 0, AlignTopLeft, false))
+	renderEntity(r, leader, nil, nil, topCtx)
+	if r.pending == nil || !strings.Contains(r.pending.String(), "C") {
+		t.Errorf("spline leader drawn as %v, want curves", r.pending)
+	}
 }
 
 // A table shows its "*T" block at its insertion point.
