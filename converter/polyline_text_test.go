@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	dxf "github.com/kedazo/dxf-go"
@@ -167,9 +168,41 @@ func TestMTextRotationFromXAxisDirection(t *testing.T) {
 		t.Errorf("rotation = %v, want 90", got)
 	}
 	m.XAxisDirection = dxf.Vector{}
-	m.RotationAngle = math.Pi / 2
+	m.RotationAngle = 90
 	if got := mtextRotationDeg(m); math.Abs(got-90) > 1e-9 {
 		t.Errorf("rotation from angle = %v, want 90", got)
+	}
+	// No group 11 in the file: the parser's default direction (1,0,0) must
+	// not hide group 50.
+	m = dxf.NewMText()
+	m.RotationAngle = 30
+	if got := mtextRotationDeg(m); math.Abs(got-30) > 1e-9 {
+		t.Errorf("rotation with default direction = %v, want 30", got)
+	}
+}
+
+func TestParseMTextStacksAndEscapes(t *testing.T) {
+	segs := ParseMText(`288,47 m{\H0.66x;\S2^ ;}`)
+	if len(segs) != 2 || segs[1].Text != "2" || !segs[1].Style.Superscript || segs[1].Style.HeightRelative != 0.66 {
+		t.Errorf("superscript: %+v", segs)
+	}
+	for in, want := range map[string]string{
+		`\U+0151r\U+005C`: `őr\`, // a decoded backslash stays text
+		`a\\U+0041`:       `a\U+0041`,
+		`%%c25`:           "Ø25",
+		`a^Jb`:            "a|b",
+		`1\P2`:            "1|2",
+	} {
+		var got strings.Builder
+		for _, s := range ParseMText(in) {
+			if s.NewLine {
+				got.WriteString("|")
+			}
+			got.WriteString(s.Text)
+		}
+		if got.String() != want {
+			t.Errorf("ParseMText(%q) = %q, want %q", in, got.String(), want)
+		}
 	}
 }
 

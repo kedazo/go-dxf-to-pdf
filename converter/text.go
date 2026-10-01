@@ -124,10 +124,14 @@ func resolveTextAnchor(loc, second dxf.Point, hj dxf.HorizontalTextJustification
 
 // mtextRotationDeg returns the MTEXT rotation in degrees. The X-axis direction
 // vector (group 11), when present, takes precedence over the rotation angle
-// (group 50, radians).
+// (group 50). The parser defaults a missing direction to (1,0,0), so then
+// the angle is used. Group 50 is taken in degrees, as written by ezdxf and
+// other libraries producing MTEXT without a direction (the DXF reference
+// says radians, but AutoCAD always writes the direction).
 func mtextRotationDeg(m *dxf.MText) float64 {
-	if x := m.XAxisDirection; x.X != 0 || x.Y != 0 {
-		return math.Atan2(x.Y, x.X) * 180 / math.Pi
+	x := m.XAxisDirection
+	if (x.X == 0 && x.Y == 0) || (x.X == 1 && x.Y == 0 && m.RotationAngle != 0) {
+		return m.RotationAngle
 	}
-	return m.RotationAngle * 180 / math.Pi
+	return math.Atan2(x.Y, x.X) * 180 / math.Pi
 }

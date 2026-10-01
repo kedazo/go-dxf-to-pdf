@@ -490,6 +490,7 @@ type mtextItem struct {
 	look  textLook
 	width float64 // drawn width (with the look's horizontal scale)
 	h     float64 // cap height in page mm
+	rise  float64 // baseline raise in page mm (super/subscripts)
 	col   color.RGBA
 }
 
@@ -518,10 +519,21 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		}
 
 		scaledH := defaultScaledH
-		if seg.Style.HeightRelative > 0 {
-			scaledH = defaultScaledH * seg.Style.HeightRelative
-		} else if seg.Style.Height > 0 {
+		if seg.Style.Height > 0 {
 			scaledH = r.transform.Dist(seg.Style.Height)
+		}
+		if seg.Style.HeightRelative > 0 {
+			scaledH *= seg.Style.HeightRelative
+		}
+		// Stacked super/subscripts are drawn smaller (AutoCAD's default
+		// stack scale), raised above or lowered below the baseline.
+		var dy float64
+		if seg.Style.Superscript || seg.Style.Subscript {
+			dy = scaledH * 0.5 // Y-down: raise
+			if seg.Style.Subscript {
+				dy = -scaledH * 0.3
+			}
+			scaledH *= 0.7
 		}
 		scaledH = max(scaledH, minTextHeightMM)
 
@@ -548,12 +560,12 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		if width <= 0 {
 			width = 1
 		}
-		look := r.lookWithFont(segFont, width, 0)
+		look := r.lookWithFont(segFont, width, seg.Style.ObliqueAngle)
 		face := r.textFace(look, scaledH, textColor, fontStyle)
 		textLine := canvas.NewTextLine(face, seg.Text, canvas.Left)
 		last := len(lines) - 1
 		lines[last] = append(lines[last], mtextItem{
-			seg: seg, line: textLine, look: look, width: textLine.Bounds().W() * look.width, h: scaledH, col: textColor,
+			seg: seg, line: textLine, look: look, width: textLine.Bounds().W() * look.width, h: scaledH, rise: dy, col: textColor,
 		})
 	}
 
@@ -602,7 +614,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		curY := firstBaseline + float64(li)*advance
 
 		for _, it := range items {
-			r.drawTextLine(curX, curY, it.line, it.look.width, it.look.oblique)
+			r.drawTextLine(curX, curY-it.rise, it.line, it.look.width, it.look.oblique)
 
 			// Underline / strikethrough / overstrike decorations
 			for _, deco := range []struct {
