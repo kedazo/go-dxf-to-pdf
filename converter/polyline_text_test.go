@@ -101,7 +101,7 @@ func TestPolygonMeshEdges(t *testing.T) {
 	}
 }
 
-func TestDecodeTextValue(t *testing.T) {
+func TestPlainText(t *testing.T) {
 	tests := map[string]string{
 		"plain":               "plain",
 		"%%c50":               "Ø50",
@@ -113,8 +113,8 @@ func TestDecodeTextValue(t *testing.T) {
 		"%%176":               "°",
 	}
 	for in, want := range tests {
-		if got := decodeTextValue(in); got != want {
-			t.Errorf("decodeTextValue(%q) = %q, want %q", in, got, want)
+		if got := plainText(in); got != want {
+			t.Errorf("plainText(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

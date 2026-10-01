@@ -33,17 +33,12 @@ type MTextSegment struct {
 	NewLine bool // true = start a new line before this segment
 }
 
-// mtextCharFixes maps run characters to what we draw: ^I tabs become spaces
-// (^J/^M arrive as newlines and become line breaks), and the diameter sign
-// becomes Ø, which (unlike ⌀) every Latin font has.
-var mtextCharFixes = strings.NewReplacer("\t", " ", "⌀", "Ø")
-
 // ParseMText parses MText content into styled segments, using the dxf
 // package's MTEXT run parser (formatting codes, grouping, stacks, special
-// characters).
+// characters and \U+/\M+ escapes).
 func ParseMText(s string) []MTextSegment {
 	var segments []MTextSegment
-	for _, run := range dxf.ParseMTextRuns(decodeMTextUnicode(s)) {
+	for _, run := range dxf.ParseMTextRuns(s) {
 		if run.NewParagraph {
 			segments = append(segments, MTextSegment{NewLine: true})
 		}
@@ -72,7 +67,9 @@ func ParseMText(s string) []MTextSegment {
 			style.ColorR, style.ColorG, style.ColorB = int(rgb.R), int(rgb.G), int(rgb.B)
 			style.HasColor = true
 		}
-		text := mtextCharFixes.Replace(run.Text)
+		// ^J/^M arrive as newlines (line breaks here), ^I as a tab (drawn as
+		// a space: tab stops aren't laid out).
+		text := strings.ReplaceAll(run.Text, "\t", " ")
 		for i, line := range strings.Split(text, "\n") {
 			if i > 0 {
 				segments = append(segments, MTextSegment{NewLine: true})
@@ -83,33 +80,4 @@ func ParseMText(s string) []MTextSegment {
 		}
 	}
 	return segments
-}
-
-// decodeMTextUnicode resolves \U+XXXX escapes, which the run parser leaves
-// alone. A decoded backslash or brace is escaped again so it stays text.
-func decodeMTextUnicode(s string) string {
-	if !strings.Contains(s, `\U+`) {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		if s[i] == '\\' && i+1 < len(s) {
-			if s[i+1] == '\\' { // escaped backslash: keep the pair
-				b.WriteString(`\\`)
-				i += 2
-				continue
-			}
-			if r, n := parseUnicodeEscape(s[i:]); n > 0 {
-				if r == '\\' || r == '{' || r == '}' {
-					b.WriteByte('\\')
-				}
-				b.WriteRune(r)
-				i += n
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-		i++
-	}
-	return b.String()
 }

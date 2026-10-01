@@ -349,7 +349,7 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 			expand(m, cp.Point.X, cp.Point.Y)
 		}
 	case *dxf.Text:
-		expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.Height, e.RelativeXScaleFactor,
+		expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), e.PlainText(), e.Height, e.RelativeXScaleFactor,
 			resolveTextAnchor(e.Location, e.SecondAlignmentPoint, e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
 	case *dxf.MText:
 		expandMText(bb, m, e)
@@ -395,7 +395,7 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		case e.MTextFlag&dxf.MTextFlagMultilineAttribute != 0 && e.MText.Text != "":
 			expandMText(bb, m, &e.MText)
 		default:
-			expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.TextHeight, e.RelativeXScaleFactor,
+			expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), plainText(e.Value), e.TextHeight, e.RelativeXScaleFactor,
 				resolveTextAnchor(e.Location, e.SecondAlignmentPoint, e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
 		}
 	case *dxf.Hatch:
@@ -512,7 +512,7 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		r.DrawSpline(cps, e.DegreeOfCurve, e.KnotValues)
 
 	case *dxf.Text:
-		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.Height,
+		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), e.PlainText(), e.Height,
 			resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
 				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation),
 			r.lookFor(e.TextStyleName, e.RelativeXScaleFactor, e.ObliqueAngle))
@@ -525,7 +525,7 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 			renderMText(r, &e.MText, m)
 			return
 		}
-		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), decodeTextValue(e.Value), e.TextHeight,
+		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), plainText(e.Value), e.TextHeight,
 			resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
 				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation),
 			r.lookFor(e.TextStyleName, e.RelativeXScaleFactor, e.ObliqueAngle))

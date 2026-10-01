@@ -2,80 +2,17 @@ package converter
 
 import (
 	"math"
-	"strconv"
-	"strings"
 	"unicode/utf8"
 
 	dxf "github.com/kedazo/dxf-go"
 )
 
-// parseUnicodeEscape decodes a "\U+XXXX" escape at the start of s and returns
-// the rune and the number of bytes consumed (0 if s does not start with one).
-func parseUnicodeEscape(s string) (rune, int) {
-	const prefix = `\U+`
-	if len(s) < len(prefix)+4 || !strings.HasPrefix(s, prefix) {
-		return 0, 0
-	}
-	v, err := strconv.ParseUint(s[len(prefix):len(prefix)+4], 16, 32)
-	if err != nil {
-		return 0, 0
-	}
-	return rune(v), len(prefix) + 4
-}
-
-// decodeTextValue converts the control codes of a single-line TEXT/ATTRIB
-// value into plain text: %%c %%d %%p (Ø ° ±), %%% (%), %%nnn (character
-// code), \U+XXXX escapes. %%u / %%o (underline / overline toggles) are dropped.
-func decodeTextValue(s string) string {
-	if !strings.Contains(s, "%%") && !strings.Contains(s, `\U+`) {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		if s[i] == '\\' {
-			if r, n := parseUnicodeEscape(s[i:]); n > 0 {
-				b.WriteRune(r)
-				i += n
-				continue
-			}
-		}
-		if s[i] == '%' && i+2 < len(s) && s[i+1] == '%' {
-			switch c := s[i+2]; {
-			case c == 'c' || c == 'C':
-				b.WriteRune('Ø')
-				i += 3
-				continue
-			case c == 'd' || c == 'D':
-				b.WriteRune('°')
-				i += 3
-				continue
-			case c == 'p' || c == 'P':
-				b.WriteRune('±')
-				i += 3
-				continue
-			case c == 'u' || c == 'U' || c == 'o' || c == 'O':
-				i += 3
-				continue
-			case c == '%':
-				b.WriteByte('%')
-				i += 3
-				continue
-			case c >= '0' && c <= '9':
-				j := i + 2
-				for j < len(s) && j < i+5 && s[j] >= '0' && s[j] <= '9' {
-					j++
-				}
-				if v, err := strconv.Atoi(s[i+2 : j]); err == nil && v > 0 {
-					b.WriteRune(rune(v))
-					i = j
-					continue
-				}
-			}
-		}
-		b.WriteByte(s[i])
-		i++
-	}
-	return b.String()
+// plainText decodes a single-line TEXT/ATTRIB value the way the dxf package
+// does for TEXT: %%c %%d %%p (Ø ° ±), %%% (%), %%nnn, \U+XXXX and \M+nXXXX
+// escapes; the %%u/%%o/%%k toggles are dropped.
+func plainText(value string) string {
+	t := dxf.Text{Value: value}
+	return t.PlainText()
 }
 
 // textAnchor is where and how a single-line TEXT (or ATTRIB) is anchored, in
@@ -206,16 +143,10 @@ func expandMText(bb *BBox, m affine, e *dxf.MText) {
 	expandRotatedRect(bb, m, e.InsertionPoint.X, e.InsertionPoint.Y, mtextRotationDeg(e), x0, x0+w, y0, y1)
 }
 
-// mtextRotationDeg returns the MTEXT rotation in degrees. The X-axis direction
-// vector (group 11), when present, takes precedence over the rotation angle
-// (group 50). The parser defaults a missing direction to (1,0,0), so then
-// the angle is used. Group 50 is taken in degrees, as written by ezdxf and
-// other libraries producing MTEXT without a direction (the DXF reference
-// says radians, but AutoCAD always writes the direction).
+// mtextRotationDeg returns the MTEXT rotation in degrees, from the baseline
+// direction the dxf package resolves (group 11 when present, otherwise the
+// group 50 angle in the MTEXT's plane).
 func mtextRotationDeg(m *dxf.MText) float64 {
-	x := m.XAxisDirection
-	if (x.X == 0 && x.Y == 0) || (x.X == 1 && x.Y == 0 && m.RotationAngle != 0) {
-		return m.RotationAngle
-	}
-	return math.Atan2(x.Y, x.X) * 180 / math.Pi
+	d := m.Direction()
+	return math.Atan2(d.Y, d.X) * 180 / math.Pi
 }

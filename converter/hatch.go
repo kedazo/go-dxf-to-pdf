@@ -60,7 +60,7 @@ func hatchFillColor(h *dxf.Hatch, entity RGB) RGB {
 	if g := h.Gradient; g != nil && g.IsGradient && len(g.Colors) > 0 {
 		c := g.Colors[0]
 		switch {
-		case c.TrueColor != 0:
+		case c.HasTrueColor: // 0 is black
 			return RGB{uint8(c.TrueColor >> 16), uint8(c.TrueColor >> 8), uint8(c.TrueColor)}
 		case c.Color > 0 && c.Color < 256:
 			return ACIToRGB(int16(c.Color))
