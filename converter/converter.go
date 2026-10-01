@@ -53,6 +53,9 @@ type TextStyleInfo struct {
 	Name  string
 	Font  string  // font file or name the style asks for
 	Width float64 // width factor
+	// TrueType family and face from the style's extended data ("" = none)
+	Family       string
+	Bold, Italic bool
 }
 
 // DrawingInfo contains metadata about a DXF/DWG drawing.
@@ -177,7 +180,9 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 		if font == "" {
 			font = s.Name
 		}
-		textStyles = append(textStyles, TextStyleInfo{Name: s.Name, Font: font, Width: s.WidthFactor})
+		info := TextStyleInfo{Name: s.Name, Font: font, Width: s.WidthFactor}
+		info.Family, info.Bold, info.Italic, _ = s.TrueTypeFont()
+		textStyles = append(textStyles, info)
 	}
 	usedLineTypes := make([]string, 0, len(lineTypes))
 	for name := range lineTypes {
@@ -371,6 +376,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options, images m
 		r.SetTextStyles(drawing.Styles)
 		r.SetLeaderArrows(leaderArrows)
 		r.SetImageFiles(images)
+		r.SetFrames(drawing)
 		if !isPDF {
 			r.SetMinStrokeWidth(25.4 / rasterDPI(opts.DPI)) // one pixel
 		}

@@ -53,6 +53,15 @@ type Renderer struct {
 	clipPoly     [][2]float64  // page-space clip polygon (viewport), nil = none
 	imageFiles   map[*dxf.Image]string
 	images       map[string]image.Image // decoded image files
+	wipeoutFrame bool                   // WIPEOUTFRAME 1: wipeout outlines plot
+	imageFrame   bool                   // IMAGEFRAME 1: image outlines plot
+}
+
+// SetFrames sets whether the outlines of wipeouts and images plot, from
+// the drawing's WIPEOUTVARIABLES and RASTERVARIABLES (no frames without).
+func (r *Renderer) SetFrames(d *dxf.Drawing) {
+	r.wipeoutFrame = d.WipeoutVariables != nil && d.WipeoutVariables.IsFramePlotted()
+	r.imageFrame = d.RasterVariables != nil && d.RasterVariables.IsFramePlotted()
 }
 
 // SetClipPolygon clips what follows to a polygon in page coordinates (nil
@@ -454,29 +463,50 @@ const (
 // minTextHeightMM keeps tiny annotation text legible on paper.
 const minTextHeightMM = 0.5
 
-// textStyle is a STYLE table entry: font name and default width/slant.
+// textStyle is a STYLE table entry: font file, TrueType family and face,
+// and default width/slant.
 type textStyle struct {
-	font    string
-	width   float64
-	oblique float64 // degrees
+	font         string
+	family       string // TrueType family from the style's extended data ("" = none)
+	bold, italic bool
+	width        float64
+	oblique      float64 // degrees
+}
+
+// faceStyle is the canvas face style for bold/italic.
+func faceStyle(bold, italic bool) canvas.FontStyle {
+	style := canvas.FontRegular
+	if bold {
+		style |= canvas.FontBold
+	}
+	if italic {
+		style |= canvas.FontItalic
+	}
+	return style
 }
 
 // SetTextStyles sets the drawing's STYLE table.
 func (r *Renderer) SetTextStyles(styles []dxf.Style) {
 	r.textStyles = make(map[string]textStyle, len(styles))
-	for _, s := range styles {
-		font := s.PrimaryFontFileName
-		if font == "" {
-			font = s.Name
+	for i := range styles {
+		s := &styles[i]
+		st := textStyle{font: s.PrimaryFontFileName, width: s.WidthFactor, oblique: s.ObliqueAngle}
+		if st.font == "" {
+			st.font = s.Name
 		}
-		r.textStyles[strings.ToUpper(s.Name)] = textStyle{font: font, width: s.WidthFactor, oblique: s.ObliqueAngle}
+		// Bold and italic variants of one TrueType file differ only here.
+		if family, bold, italic, ok := s.TrueTypeFont(); ok {
+			st.family, st.bold, st.italic = family, bold, italic
+		}
+		r.textStyles[strings.ToUpper(s.Name)] = st
 	}
 }
 
-// textLook is how a piece of text is drawn: font and horizontal scale
-// (width factor × substitution compensation) and slant.
+// textLook is how a piece of text is drawn: font and face, horizontal
+// scale (width factor × substitution compensation) and slant.
 type textLook struct {
 	font    *fontSet
+	style   canvas.FontStyle
 	width   float64
 	oblique float64 // degrees
 }
@@ -497,18 +527,21 @@ func (r *Renderer) lookFor(styleName string, width, oblique float64) textLook {
 	if oblique == 0 {
 		oblique = st.oblique
 	}
-	return r.lookWithFont(st.font, width, oblique)
+	look := r.lookWithFont(st.font, st.family, width, oblique)
+	look.style = faceStyle(st.bold, st.italic)
+	return look
 }
 
-// lookWithFont returns the look for a font name, width factor and slant.
-func (r *Renderer) lookWithFont(font string, width, oblique float64) textLook {
-	fs := r.fonts.font(font)
+// lookWithFont returns the look (regular face) for a font file and/or
+// family name, width factor and slant.
+func (r *Renderer) lookWithFont(font, family string, width, oblique float64) textLook {
+	fs := r.fonts.fontFor(font, family)
 	return textLook{font: fs, width: width * fs.widthComp, oblique: oblique}
 }
 
-// styleFont returns the font name of a text style ("" = default).
-func (r *Renderer) styleFont(styleName string) string {
-	return r.textStyles[strings.ToUpper(styleName)].font
+// textStyleNamed returns a text style by name (the zero style if unknown).
+func (r *Renderer) textStyleNamed(styleName string) textStyle {
+	return r.textStyles[strings.ToUpper(styleName)]
 }
 
 // textFace returns a face of the look's font whose cap height is heightMM.
@@ -561,7 +594,7 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hA
 	py := r.transform.Y(y)
 	scaledH := max(r.transform.Dist(heightMM), minTextHeightMM)
 
-	face := r.textFace(look, scaledH, r.color, canvas.FontRegular)
+	face := r.textFace(look, scaledH, r.color, look.style)
 	textLine := canvas.NewTextLine(face, text, canvas.Left)
 	width := textLine.Bounds().W() * look.width
 	if r.outsideClip(px, py, width+2*scaledH) {
@@ -597,9 +630,9 @@ type mtextItem struct {
 
 // DrawMText draws multi-line formatted text. attach is the DXF attachment
 // point (1..9: top/middle/bottom × left/center/right); lineSpacing is the
-// MTEXT line spacing factor (0 = default 1.0); font is the text style's font,
-// used where the text sets none.
-func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing float64, font string) {
+// MTEXT line spacing factor (0 = default 1.0); style is the text style,
+// whose font and face apply where the text sets no font.
+func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing float64, style textStyle) {
 	r.flush()
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
@@ -638,30 +671,24 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		}
 		scaledH = max(scaledH, minTextHeightMM)
 
-		var fontStyle canvas.FontStyle
-		if seg.Style.Bold && seg.Style.Italic {
-			fontStyle = canvas.FontBold | canvas.FontItalic
-		} else if seg.Style.Bold {
-			fontStyle = canvas.FontBold
-		} else if seg.Style.Italic {
-			fontStyle = canvas.FontItalic
-		} else {
-			fontStyle = canvas.FontRegular
+		// A run without a \f font code is in the text style's font and face.
+		segFont, segFamily := style.font, style.family
+		bold, italic := style.bold || seg.Style.Bold, style.italic || seg.Style.Italic
+		if seg.Style.FontName != "" {
+			segFont, segFamily = seg.Style.FontName, ""
+			bold, italic = seg.Style.Bold, seg.Style.Italic
 		}
+		fontStyle := faceStyle(bold, italic)
 
 		textColor := r.color
 		if seg.Style.HasColor {
 			textColor = color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
 		}
-		segFont := font
-		if seg.Style.FontName != "" {
-			segFont = seg.Style.FontName
-		}
 		width := seg.Style.WidthFactor
 		if width <= 0 {
 			width = 1
 		}
-		look := r.lookWithFont(segFont, width, seg.Style.ObliqueAngle)
+		look := r.lookWithFont(segFont, segFamily, width, seg.Style.ObliqueAngle)
 		face := r.textFace(look, scaledH, textColor, fontStyle)
 		textLine := canvas.NewTextLine(face, seg.Text, canvas.Left)
 		last := len(lines) - 1

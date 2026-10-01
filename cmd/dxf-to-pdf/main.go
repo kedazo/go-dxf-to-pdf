@@ -135,12 +135,23 @@ func main() {
 		if len(info.TextStyles) > 0 {
 			fmt.Printf("\nText styles (font → drawn with):\n")
 			for _, s := range info.TextStyles {
-				path, comp := converter.FontSubstitute(s.Font, cli.FontDir)
+				path, comp := converter.FontSubstitute(s.Font, s.Family, s.Bold, s.Italic, cli.FontDir)
 				sub := filepath.Base(path)
 				if comp != 1 {
 					sub += fmt.Sprintf(" at %.0f%% width", comp*100)
 				}
-				fmt.Printf("  %-24s %-16s → %s\n", s.Name, s.Font, sub)
+				font := s.Font
+				if s.Family != "" {
+					font += " (" + s.Family
+					if s.Bold {
+						font += " bold"
+					}
+					if s.Italic {
+						font += " italic"
+					}
+					font += ")"
+				}
+				fmt.Printf("  %-24s %-36s → %s\n", s.Name, font, sub)
 			}
 		}
 

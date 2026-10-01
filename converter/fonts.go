@@ -136,12 +136,17 @@ func (fs *fontSet) face(capHeightMM float64, col color.RGBA, style canvas.FontSt
 	return fs.family.Face(capHeightMM/fs.capRatio*2.83465, col, style, canvas.FontNormal) // mm → pt
 }
 
-// FontSubstitute returns the font file text in the given CAD font is drawn
-// with (fontDir as for Options.FontDir) and the horizontal scale applied to
-// match the original's widths.
-func FontSubstitute(font, fontDir string) (path string, widthComp float64) {
-	fs := fontLibrary(fontDir).font(font)
-	return fs.files[0], fs.widthComp
+// FontSubstitute returns the font file text in the given CAD font (file
+// and/or TrueType family, bold/italic face) is drawn with (fontDir as for
+// Options.FontDir) and the horizontal scale applied to match the
+// original's widths.
+func FontSubstitute(font, family string, bold, italic bool, fontDir string) (path string, widthComp float64) {
+	fs := fontLibrary(fontDir).fontFor(font, family)
+	path = fs.files[fontStyleIndex(faceStyle(bold, italic))]
+	if path == "" {
+		path = fs.files[0] // drawn with the regular face
+	}
+	return path, fs.widthComp
 }
 
 // fontLib resolves CAD font names to font files from a set of directories.
@@ -224,18 +229,26 @@ func (l *fontLib) find(name string) string {
 
 // font returns the font set substituting the CAD font name.
 func (l *fontLib) font(name string) *fontSet {
+	return l.fontFor(name, "")
+}
+
+// fontFor returns the font set for a text style's font file and TrueType
+// family name (either may be empty): the file itself if it is installed,
+// else a substitute chosen by both names.
+func (l *fontLib) fontFor(file, family string) *fontSet {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := strings.ToLower(strings.TrimSpace(name))
+	file, family = strings.ToLower(strings.TrimSpace(file)), strings.ToLower(strings.TrimSpace(family))
+	key := file + "|" + family
 	if fs, ok := l.sets[key]; ok {
 		return fs
 	}
-	fs := l.resolve(key)
+	fs := l.resolve(file, family)
 	l.sets[key] = fs
 	return fs
 }
 
-func (l *fontLib) resolve(name string) *fontSet {
+func (l *fontLib) resolve(name, family string) *fontSet {
 	newSet := func(files [4]string, widthComp float64) *fontSet {
 		return &fontSet{files: files, family: canvas.NewFontFamily(filepath.Base(files[0])), widthComp: widthComp}
 	}
@@ -256,7 +269,8 @@ func (l *fontLib) resolve(name string) *fontSet {
 			return newSet(files, 1)
 		}
 	}
-	for _, c := range fontFallbacks[fontCategory(name)] {
+	hint := strings.TrimSpace(family + " " + name) // e.g. "arial narrow arialn.ttf"
+	for _, c := range fontFallbacks[fontCategory(hint)] {
 		var files [4]string
 		if files[0] = l.find(c.files[0]); files[0] == "" {
 			continue
@@ -264,10 +278,10 @@ func (l *fontLib) resolve(name string) *fontSet {
 		for i := 1; i < 4; i++ {
 			files[i] = l.find(c.files[i])
 		}
-		return newSet(files, c.widthComp*fontNarrowing(name))
+		return newSet(files, c.widthComp*fontNarrowing(hint))
 	}
-	if name != "" {
-		return l.resolve("") // plain sans
+	if hint != "" {
+		return l.resolve("", "") // plain sans
 	}
 	// Nothing found: keep the historical location, so the error shows there.
 	return newSet([4]string{filepath.Join(DefaultFontDir(), "DejaVuSans.ttf")}, 1)

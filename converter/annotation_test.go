@@ -114,6 +114,24 @@ func TestMLeaderParts(t *testing.T) {
 	}
 }
 
+// Wipeout outlines plot only with WIPEOUTFRAME 1.
+func TestWipeoutFrame(t *testing.T) {
+	w := dxf.NewWipeout()
+	w.SetUVector(dxf.Vector{X: 10})
+	w.SetVVector(dxf.Vector{Y: 10})
+	w.SetImageSize(dxf.Vector{X: 1, Y: 1})
+	paper := PaperSize{Width: 100, Height: 100}
+	for frame, want := range map[int16]bool{0: false, 1: true, 2: false} {
+		r := NewRenderer(paper, false, 0, "")
+		r.SetTransform(NewTransform(BBox{MaxX: 100, MaxY: 100}, 1, paper, 0, AlignTopLeft, false))
+		r.SetFrames(&dxf.Drawing{WipeoutVariables: &dxf.WipeoutVariables{Frame: frame}})
+		renderEntity(r, w, nil, nil, topCtx)
+		if got := r.pending != nil && !r.pending.Empty(); got != want {
+			t.Errorf("WIPEOUTFRAME %d: outline drawn = %v, want %v", frame, got, want)
+		}
+	}
+}
+
 func TestWipeoutPolygon(t *testing.T) {
 	w := dxf.NewWipeout()
 	w.SetLocation(dxf.Point{X: 10, Y: 20})

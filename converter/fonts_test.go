@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	dxf "github.com/kedazo/dxf-go"
+	"github.com/tdewolff/canvas"
 )
 
 func TestFontCategory(t *testing.T) {
@@ -77,6 +80,31 @@ func TestFontSubstitution(t *testing.T) {
 	}
 }
 
+// A style's TrueType data picks the face: bold and italic styles may share
+// one font file.
+func TestStyleTrueTypeFace(t *testing.T) {
+	style := func(name, file string, flags int) dxf.Style {
+		s := dxf.NewStyle()
+		s.Name, s.PrimaryFontFileName = name, file
+		s.XData = dxf.XData{{Name: "ACAD", Items: []dxf.XDataItem{{Code: 1000, String: "Arial Narrow"}, {Code: 1071, Int: flags}}}}
+		return *s
+	}
+	r := NewRenderer(PaperSize{Width: 10, Height: 10}, false, 0, "")
+	r.SetTextStyles([]dxf.Style{style("PLAIN", "ARIALN.TTF", 0), style("BOLD", "ARIALN.TTF", 0x2000000), style("BI", "ARIALN.TTF", 0x3000000)})
+	for name, want := range map[string]canvas.FontStyle{
+		"PLAIN": canvas.FontRegular,
+		"BOLD":  canvas.FontBold,
+		"BI":    canvas.FontBold | canvas.FontItalic,
+	} {
+		if got := r.lookFor(name, 0, 0).style; got != want {
+			t.Errorf("style %s: face %v, want %v", name, got, want)
+		}
+	}
+	if st := r.textStyleNamed("BOLD"); st.family != "Arial Narrow" || !st.bold || st.italic {
+		t.Errorf("BOLD style = %+v", st)
+	}
+}
+
 // The width factor stretches the drawn text horizontally.
 func TestTextWidthFactor(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(DefaultFontDir(), "DejaVuSans.ttf")); err != nil {
@@ -86,7 +114,7 @@ func TestTextWidthFactor(t *testing.T) {
 	drawnWidth := func(width float64) float64 {
 		r := NewRenderer(paper, false, 0, "")
 		r.SetTransform(NewTransform(BBox{MaxX: 200, MaxY: 100}, 1, paper, 0, AlignTopLeft, false))
-		r.DrawText(10, 50, "WIDTH TEST", 5, 0, 0, vAlignBaseline, r.lookWithFont("", width, 0))
+		r.DrawText(10, 50, "WIDTH TEST", 5, 0, 0, vAlignBaseline, r.lookWithFont("", "", width, 0))
 		return r.c.Bounds().W()
 	}
 	if full, half := drawnWidth(1), drawnWidth(0.5); math.Abs(half/full-0.5) > 0.01 {

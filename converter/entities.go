@@ -568,6 +568,9 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 			poly[i][0], poly[i][1] = m.apply(p[0], p[1])
 		}
 		r.FillPolygons([][][2]float64{poly}, RGB{255, 255, 255})
+		if r.wipeoutFrame { // the outline, in the wipeout's own style
+			r.DrawPolyline(poly, true)
+		}
 
 	case *dxf.Solid:
 		om := m.mul(ocsAffine(e.ExtrusionDirection, e.FirstCorner.Z))
@@ -672,7 +675,7 @@ func renderMText(r *Renderer, e *dxf.MText, m affine) {
 		row, col := (attach-1)/3, (attach-1)%3
 		attach = row*3 + (2 - col) + 1
 	}
-	r.DrawMText(x, y, segments, e.InitialTextHeight*hScale, rot, attach, e.LineSpacingFactor, r.styleFont(e.TextStyleName))
+	r.DrawMText(x, y, segments, e.InitialTextHeight*hScale, rot, attach, e.LineSpacingFactor, r.textStyleNamed(e.TextStyleName))
 }
 
 // expandBulge expands bb with the arc of a bulged polyline edge (local

@@ -40,8 +40,22 @@ func (r *Renderer) loadImage(path string) image.Image {
 }
 
 // renderImage draws an IMAGE: its pixels span the U and V vectors from the
-// insertion point (the lower-left corner), mapped through m.
+// insertion point (the lower-left corner), mapped through m. With IMAGEFRAME
+// 1 its outline is drawn too, also when the file is missing.
 func renderImage(r *Renderer, e *dxf.Image, m affine) {
+	drawImagePixels(r, e, m)
+	if r.imageFrame {
+		loc, u, v, s := e.Location(), e.UVector(), e.VVector(), e.ImageSize()
+		frame := make([][2]float64, 0, 4)
+		for _, f := range [4][2]float64{{0, 0}, {1, 0}, {1, 1}, {0, 1}} {
+			x, y := m.apply(loc.X+u.X*s.X*f[0]+v.X*s.Y*f[1], loc.Y+u.Y*s.X*f[0]+v.Y*s.Y*f[1])
+			frame = append(frame, [2]float64{x, y})
+		}
+		r.DrawPolyline(frame, true)
+	}
+}
+
+func drawImagePixels(r *Renderer, e *dxf.Image, m affine) {
 	path := r.imageFiles[e]
 	if path == "" {
 		return
