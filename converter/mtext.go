@@ -24,6 +24,7 @@ type MTextStyle struct {
 	Strikethrough  bool
 	Superscript    bool // \Sx^; stack (e.g. the 2 of m²)
 	Subscript      bool // \S^x; stack
+	Stacked        bool // \Sa/b; fraction: Text is "a/b"
 }
 
 // MTextSegment is a piece of text with uniform style.
@@ -54,6 +55,7 @@ func ParseMText(s string) []MTextSegment {
 			Strikethrough: run.Strike,
 			Superscript:   run.Superscript,
 			Subscript:     run.Subscript,
+			Stacked:       run.Stacked && !run.Superscript && !run.Subscript,
 		}
 		if run.HeightFactor != 1 {
 			style.HeightRelative = run.HeightFactor
@@ -67,10 +69,9 @@ func ParseMText(s string) []MTextSegment {
 			style.ColorR, style.ColorG, style.ColorB = int(rgb.R), int(rgb.G), int(rgb.B)
 			style.HasColor = true
 		}
-		// ^J/^M arrive as newlines (line breaks here), ^I as a tab (drawn as
-		// a space: tab stops aren't laid out).
-		text := strings.ReplaceAll(run.Text, "\t", " ")
-		for i, line := range strings.Split(text, "\n") {
+		// ^J/^M arrive as newlines (line breaks here); tabs stay, DrawMText
+		// moves to the next tab stop.
+		for i, line := range strings.Split(run.Text, "\n") {
 			if i > 0 {
 				segments = append(segments, MTextSegment{NewLine: true})
 			}

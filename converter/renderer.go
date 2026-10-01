@@ -650,22 +650,59 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hA
 	}
 }
 
-// mtextItem is one laid-out MText segment.
+// mtextItem is one laid-out piece of MText: a run of text, or a stacked
+// fraction.
 type mtextItem struct {
 	seg   MTextSegment
 	line  *canvas.Text
+	den   *canvas.Text // a stacked fraction's denominator (line is the numerator)
 	look  textLook
+	x     float64 // offset from the line start in page mm
 	width float64 // drawn width (with the look's horizontal scale)
 	h     float64 // cap height in page mm
 	rise  float64 // baseline raise in page mm (super/subscripts)
 	col   color.RGBA
 }
 
+// mtextTabStops is the default distance of MText tab stops, in text
+// heights. (AutoCAD's own default is unverified; MText paragraph codes with
+// explicit tab stops aren't available from the parser yet.)
+const mtextTabStops = 4
+
+// mtextStackScale is the height of a stacked fraction's parts, as a share
+// of the text height.
+const mtextStackScale = 0.6
+
+// splitMTextRun splits a run into the pieces laid out on their own: tabs,
+// and, when wrapping, words (each with its trailing spaces).
+func splitMTextRun(text string, words bool) []string {
+	var pieces []string
+	start := 0
+	for i := 0; i < len(text); i++ {
+		switch {
+		case text[i] == '\t':
+			if start < i {
+				pieces = append(pieces, text[start:i])
+			}
+			pieces = append(pieces, "\t")
+			start = i + 1
+		case words && text[i] == ' ' && (i+1 == len(text) || text[i+1] != ' '):
+			pieces = append(pieces, text[start:i+1])
+			start = i + 1
+		}
+	}
+	if start < len(text) {
+		pieces = append(pieces, text[start:])
+	}
+	return pieces
+}
+
 // DrawMText draws multi-line formatted text. attach is the DXF attachment
 // point (1..9: top/middle/bottom × left/center/right); lineSpacing is the
-// MTEXT line spacing factor (0 = default 1.0); style is the text style,
-// whose font and face apply where the text sets no font.
-func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing float64, style textStyle) {
+// MTEXT line spacing factor (0 = default 1.0); wrapWidthMM is the width the
+// lines wrap at (0 = no wrapping); style is the text style, whose font and
+// face apply where the text sets no font.
+func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing, wrapWidthMM float64, style textStyle) {
 	r.flush()
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
@@ -673,12 +710,29 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	if lineSpacing <= 0 {
 		lineSpacing = 1
 	}
+	tabStop := mtextTabStops * defaultScaledH
 
-	// Pass 1: lay out segments into lines and measure them.
+	// Pass 1: lay out segments into lines (wrapping words at wrapWidthMM,
+	// moving to tab stops) and measure them.
 	lines := [][]mtextItem{nil}
+	x0 := 0.0 // pen position in the current line
+	newLine := func() {
+		lines = append(lines, nil)
+		x0 = 0
+	}
+	place := func(it mtextItem, inkWidth float64) {
+		last := len(lines) - 1
+		if wrapWidthMM > 0 && x0 > 0 && x0+inkWidth > wrapWidthMM {
+			newLine()
+			last++
+		}
+		it.x = x0
+		x0 += it.width
+		lines[last] = append(lines[last], it)
+	}
 	for _, seg := range segments {
 		if seg.NewLine {
-			lines = append(lines, nil)
+			newLine()
 			continue
 		}
 		if seg.Text == "" {
@@ -722,12 +776,28 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			width = 1
 		}
 		look := r.lookWithFont(segFont, segFamily, width, seg.Style.ObliqueAngle)
+
+		// A stacked fraction: numerator over denominator, smaller.
+		if num, den, ok := strings.Cut(seg.Text, "/"); ok && seg.Style.Stacked {
+			face := r.textFace(look, max(scaledH*mtextStackScale, minTextHeightMM), textColor, fontStyle)
+			it := mtextItem{seg: seg, look: look, h: scaledH, col: textColor,
+				line: canvas.NewTextLine(face, num, canvas.Left), den: canvas.NewTextLine(face, den, canvas.Left)}
+			it.width = max(face.TextWidth(num), face.TextWidth(den)) * look.width
+			place(it, it.width)
+			continue
+		}
+
 		face := r.textFace(look, scaledH, textColor, fontStyle)
-		textLine := canvas.NewTextLine(face, seg.Text, canvas.Left)
-		last := len(lines) - 1
-		lines[last] = append(lines[last], mtextItem{
-			seg: seg, line: textLine, look: look, width: textLine.Bounds().W() * look.width, h: scaledH, rise: dy, col: textColor,
-		})
+		for _, piece := range splitMTextRun(seg.Text, wrapWidthMM > 0) {
+			if piece == "\t" {
+				x0 = (math.Floor(x0/tabStop+1e-9) + 1) * tabStop
+				continue
+			}
+			textLine := canvas.NewTextLine(face, piece, canvas.Left)
+			w := textLine.Bounds().W() * look.width
+			ink := face.TextWidth(strings.TrimRight(piece, " ")) * look.width // trailing spaces may hang over
+			place(mtextItem{seg: seg, line: textLine, look: look, width: w, h: scaledH, rise: dy, col: textColor}, ink)
+		}
 	}
 
 	// Pass 2: anchor the block according to the attachment point. AutoCAD's
@@ -749,13 +819,16 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		firstBaseline = py - (n-1)*advance
 	}
 
+	lineWidth := func(items []mtextItem) float64 {
+		if len(items) == 0 {
+			return 0
+		}
+		last := items[len(items)-1]
+		return last.x + last.width
+	}
 	maxW := 0.0
 	for _, items := range lines {
-		w := 0.0
-		for _, it := range items {
-			w += it.width
-		}
-		maxW = max(maxW, w)
+		maxW = max(maxW, lineWidth(items))
 	}
 	if r.outsideClip(px, py, maxW+n*advance+2*defaultScaledH) {
 		return
@@ -771,14 +844,29 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	}
 
 	for li, items := range lines {
-		lineW := 0.0
-		for _, it := range items {
-			lineW += it.width
-		}
-		curX := px - hAlign*lineW
+		lineX := px - hAlign*lineWidth(items)
 		curY := firstBaseline + float64(li)*advance
 
 		for _, it := range items {
+			curX := lineX + it.x
+			if it.den != nil {
+				// Stacked fraction: numerator above a bar, denominator below,
+				// each centred in the item's width.
+				bar := curY - it.h*0.5
+				numW, denW := it.line.Bounds().W()*it.look.width, it.den.Bounds().W()*it.look.width
+				r.drawTextLine(curX+(it.width-numW)/2, curY-it.h*0.7, it.line, it.look.width, it.look.oblique)
+				r.drawTextLine(curX+(it.width-denW)/2, curY+it.h*0.35, it.den, it.look.width, it.look.oblique)
+				r.ctx.Push()
+				r.ctx.SetStrokeColor(it.col)
+				r.ctx.SetStrokeWidth(max(it.h*0.05, r.minStrokeMM))
+				r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
+				dp := &canvas.Path{}
+				dp.MoveTo(curX, bar)
+				dp.LineTo(curX+it.width, bar)
+				r.ctx.DrawPath(0, 0, dp)
+				r.ctx.Pop()
+				continue
+			}
 			r.drawTextLine(curX, curY-it.rise, it.line, it.look.width, it.look.oblique)
 
 			// Underline / strikethrough / overstrike decorations
@@ -805,8 +893,6 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				r.ctx.DrawPath(0, 0, dp)
 				r.ctx.Pop()
 			}
-
-			curX += it.width
 		}
 	}
 

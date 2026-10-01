@@ -95,6 +95,17 @@ func expandTextLine(bb *BBox, t affine, value string, height, widthFactor float6
 	expandRotatedRect(bb, t, a.X, a.Y, a.RotationDeg, x0, x0+w, y0, y1)
 }
 
+// mtextBoxWidth returns the width an MTEXT's lines wrap at, in drawing
+// units (0 = no box). The dxf package reads a missing group 41 as 1.0 (its
+// default), which would wrap after every word, so exactly 1.0 counts as no
+// box too.
+func mtextBoxWidth(e *dxf.MText) float64 {
+	if w := e.ReferenceRectangleWidth; w > 0 && w != 1 {
+		return w
+	}
+	return 0
+}
+
 // expandMText expands bb with the estimated extent of an MTEXT, laid out as
 // DrawMText does (line pitch 5/3 of the height, attachment point anchor).
 func expandMText(bb *BBox, m affine, e *dxf.MText) {
@@ -103,20 +114,32 @@ func expandMText(bb *BBox, m affine, e *dxf.MText) {
 		bb.Expand(m.apply(e.InsertionPoint.X, e.InsertionPoint.Y))
 		return
 	}
-	lines, maxRunes, cur := 1, 0, 0
+	// Paragraph widths in characters; a box width wraps them into more lines.
+	var paragraphs []int
+	cur := 0
 	for _, s := range ParseMText(e.FormattedText()) {
 		if s.NewLine {
-			lines, cur = lines+1, 0
+			paragraphs, cur = append(paragraphs, cur), 0
 			continue
 		}
 		cur += utf8.RuneCountInString(s.Text)
-		maxRunes = max(maxRunes, cur)
+	}
+	paragraphs = append(paragraphs, cur)
+	lines, w := 0, 0.0
+	for _, runes := range paragraphs {
+		pw := float64(runes) * estCharWidth * h
+		if box := mtextBoxWidth(e); box > 0 && pw > box {
+			lines += int(math.Ceil(pw / box))
+			pw = box
+		} else {
+			lines++
+		}
+		w = max(w, pw)
 	}
 	spacing := e.LineSpacingFactor
 	if spacing <= 0 {
 		spacing = 1
 	}
-	w := float64(maxRunes) * estCharWidth * h
 	total := h + float64(lines-1)*h*5/3*spacing
 	attach := int(e.AttachmentPoint)
 	if attach < 1 || attach > 9 {

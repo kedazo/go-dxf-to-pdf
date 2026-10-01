@@ -4,10 +4,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	dxf "github.com/kedazo/dxf-go"
+	"github.com/tdewolff/canvas"
 )
 
 func polyVertex(x, y float64, flags int) dxf.Vertex {
@@ -221,6 +223,52 @@ func TestMTextRotationFromXAxisDirection(t *testing.T) {
 	m.RotationAngle = 30
 	if got := mtextRotationDeg(m); math.Abs(got-30) > 1e-9 {
 		t.Errorf("rotation with default direction = %v, want 30", got)
+	}
+}
+
+func TestSplitMTextRun(t *testing.T) {
+	got := splitMTextRun("a\tbc de  f", false)
+	if want := []string{"a", "\t", "bc de  f"}; !slices.Equal(got, want) {
+		t.Errorf("tabs only = %q, want %q", got, want)
+	}
+	got = splitMTextRun("a\tbc de  f", true)
+	if want := []string{"a", "\t", "bc ", "de  ", "f"}; !slices.Equal(got, want) {
+		t.Errorf("words = %q, want %q", got, want)
+	}
+}
+
+// Tabs reach the layout; a fraction stack is marked as such.
+func TestParseMTextTabsAndFractions(t *testing.T) {
+	segs := ParseMText("a\tb")
+	if len(segs) != 1 || segs[0].Text != "a\tb" {
+		t.Errorf("tab = %+v", segs)
+	}
+	segs = ParseMText(`1{\S3/4;}`)
+	if len(segs) != 2 || !segs[1].Style.Stacked || segs[1].Text != "3/4" {
+		t.Errorf("fraction = %+v", segs)
+	}
+}
+
+// Text wider than the MTEXT's box wraps to more lines; tabs move the text to
+// the next stop.
+func TestMTextWrapAndTabs(t *testing.T) {
+	if _, err := os.Stat(filepath.Join(DefaultFontDir(), "DejaVuSans.ttf")); err != nil {
+		t.Skip("DejaVu fonts not available")
+	}
+	paper := PaperSize{Width: 200, Height: 200}
+	drawn := func(text string, wrap float64) canvas.Rect {
+		r := NewRenderer(paper, false, 0, "")
+		r.SetTransform(NewTransform(BBox{MaxX: 200, MaxY: 200}, 1, paper, 0, AlignTopLeft, false))
+		r.DrawMText(10, 150, ParseMText(text), 5, 0, 1, 1, wrap, textStyle{})
+		return r.c.Bounds()
+	}
+	long := "one two three four five six seven eight"
+	if full, wrapped := drawn(long, 0), drawn(long, 40); wrapped.H() < 2*full.H() || wrapped.W() > 41 {
+		t.Errorf("wrapped %v, unwrapped %v: want several lines within 40 mm", wrapped, full)
+	}
+	// "a" then a tab: "b" starts at the first stop, 4 × 5 mm from the start.
+	if b := drawn("a\tb", 0); b.X1 < 10+20 || b.X1 > 10+20+5 {
+		t.Errorf("tabbed text ends at x=%v, want just past the stop at 30", b.X1)
 	}
 }
 
