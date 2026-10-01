@@ -151,10 +151,6 @@ func newLeaderArrows(d *dxf.Drawing) *leaderArrows {
 	la.textStyles = styleNames
 	la.mleaders = make(map[dxf.Handle]mleaderLook, len(d.MLeaderStyles))
 	for _, s := range d.MLeaderStyles {
-		lineType := s.LeaderLineType
-		if lineType == mleaderLineInvisible { // also what a missing 173 reads as
-			lineType = mleaderLineStraight
-		}
 		la.mleaders[s.Handle] = mleaderLook{
 			arrowBlock: recordNames[s.ArrowheadHandle],
 			arrowSize:  s.ArrowheadSize,
@@ -164,7 +160,7 @@ func newLeaderArrows(d *dxf.Drawing) *leaderArrows {
 			textColor:  s.TextColor,
 			lineColor:  s.LeaderLineColor,
 			lineWeight: s.LeaderLineWeight,
-			lineType:   lineType,
+			lineType:   s.LeaderLineType, // a missing 173 reads as straight
 		}
 	}
 	return la

@@ -157,11 +157,16 @@ func TestMLeaderStyle(t *testing.T) {
 	d.MLeaderStyles = []dxf.MLeaderStyle{{
 		Handle: 0x70, ArrowheadHandle: 0x50, ArrowheadSize: 0.2, TextStyleHandle: 0x60, TextHeight: 0.25,
 		TextAlignment: 1, TextColor: objColor(0xC3, 1), LeaderLineColor: objColor(0xC2, 0x00FF00),
-		LeaderLineWeight: dxf.LineWeight(50),
-	}}
+		LeaderLineWeight: dxf.LineWeight(50), LeaderLineType: mleaderLineSpline,
+	}, {Handle: 0x71}}
 	look, ok := newLeaderArrows(d).mleaderLook(0x70)
-	if !ok || look.arrowBlock != "DOT" || look.textStyle != "NOTES" || look.arrowSize != 0.2 || look.lineWeight != 50 {
+	if !ok || look.arrowBlock != "DOT" || look.textStyle != "NOTES" || look.arrowSize != 0.2 || look.lineWeight != 50 ||
+		look.lineType != mleaderLineSpline {
 		t.Fatalf("look = %+v (ok %v)", look, ok)
+	}
+	// A style's leader type 0 hides the lines (a missing 173 reads straight).
+	if hidden, _ := newLeaderArrows(d).mleaderLook(0x71); hidden.lineType != mleaderLineInvisible {
+		t.Errorf("style with leader type 0: line type %d, want invisible", hidden.lineType)
 	}
 	if c := objectColorRGB(look.textColor, RGB{}); c != (RGB{255, 0, 0}) {
 		t.Errorf("text colour = %v, want ACI 1 red", c)
