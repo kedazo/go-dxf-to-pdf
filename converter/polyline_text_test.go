@@ -313,6 +313,14 @@ func TestMTextParagraphs(t *testing.T) {
 	if b := drawn(`\pt10;a`+"\t"+`b`, 0); b.X1 < 10+50 || b.X1 > 10+50+5 {
 		t.Errorf("tab stop: text ends at x=%v, want just past 60", b.X1)
 	}
+	// A right stop at 20 heights (100 mm) ends the text there; a centre stop
+	// centres it there.
+	if b := drawn(`\pxt4,r20;a`+"\t"+`b`+"\t"+`bbb`, 0); math.Abs(b.X1-110) > 0.5 {
+		t.Errorf("right tab stop: text ends at x=%v, want 110", b.X1)
+	}
+	if b := drawn(`\pxtc20;`+"\t"+`bbb`, 0); math.Abs((b.X0+b.X1)/2-110) > 0.5 {
+		t.Errorf("centre tab stop: text spans %v..%v, want it centred at 110", b.X0, b.X1)
+	}
 	// Centred in a 100 mm box from x = 10: the text's middle is near 60.
 	if b := drawn(`\pqc;ab`, 100); math.Abs((b.X0+b.X1)/2-60) > 1 {
 		t.Errorf("centred: text spans %v..%v, want it centred at 60", b.X0, b.X1)

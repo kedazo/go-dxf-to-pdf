@@ -760,6 +760,14 @@ type mtextItem struct {
 // unverified).
 const mtextTabStops = 4
 
+// mtextTabbed is text placed at a centre or right tab stop, still to be
+// aligned on it.
+type mtextTabbed struct {
+	first      int     // its first item in the line
+	stop, from float64 // the stop, and the pen position before the tab
+	kind       dxf.MTextTabStopType
+}
+
 // mtextWrapSlack widens an MText box for wrapping: boxes are often fitted
 // to the text in the original font, which ours only approximates.
 const mtextWrapSlack = 1.03
@@ -866,11 +874,35 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		x0 = max(x0, indent*defaultScaledH)
 	}
 	canBreak := false // the line may wrap before the next piece (after a space or tab)
+	// The text after a centre or right tab stop, up to the next tab or the
+	// line end, is laid out from the stop and then moved to centre on it or
+	// end at it (but not back over what precedes it).
+	var tabbed *mtextTabbed
+	alignTabbed := func() {
+		g := tabbed
+		tabbed = nil
+		items := lines[len(lines)-1]
+		if g == nil || g.first >= len(items) {
+			return
+		}
+		last := items[len(items)-1]
+		w := last.x + last.ink - items[g.first].x
+		shift := -w
+		if g.kind == dxf.MTextTabStopCenter {
+			shift = -w / 2
+		}
+		shift = max(shift, g.from-g.stop)
+		for k := g.first; k < len(items); k++ {
+			items[k].x += shift
+		}
+		x0 += shift
+	}
 	place := func(it mtextItem, inkWidth float64) {
 		begin(it.seg.Style.Paragraph)
 		last := len(lines) - 1
 		limit := wrapWidthMM - paras[last].RightIndent*defaultScaledH
 		if wrapWidthMM > 0 && canBreak && len(lines[last]) > 0 && x0+inkWidth > limit {
+			tabbed = nil // wrapped: left as a left stop
 			newLine(false)
 			begin(it.seg.Style.Paragraph)
 			last++
@@ -882,10 +914,14 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		canBreak = it.width > inkWidth // ends with a space
 	}
 	tab := func(p dxf.MTextParagraph) {
+		alignTabbed()
 		canBreak = true
 		begin(p)
-		for _, stop := range p.TabStops { // centre and right stops are taken as left ones
+		for _, stop := range p.TabStops {
 			if pos := stop.Position * defaultScaledH; pos > x0+1e-9 {
+				if stop.Type != dxf.MTextTabStopLeft {
+					tabbed = &mtextTabbed{len(lines[len(lines)-1]), pos, x0, stop.Type}
+				}
 				x0 = pos
 				return
 			}
@@ -895,6 +931,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	}
 	for _, seg := range segments {
 		if seg.NewLine {
+			alignTabbed()
 			newLine(true)
 			continue
 		}
@@ -984,6 +1021,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			place(mtextItem{seg: seg, line: textLine, look: look, width: w, h: scaledH, rise: dy, col: textColor}, ink)
 		}
 	}
+	alignTabbed()
 
 	// Pass 2: anchor the block according to the attachment point. AutoCAD's
 	// default line pitch is 5/3 of the text height.
