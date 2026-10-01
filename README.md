@@ -129,7 +129,7 @@ faces to pair; very new DWG (AC1032/2018+) may not decode via LibreDWG.
 
 DWG files are converted to DXF using `dwg2dxf` from [LibreDWG](https://github.com/LibreDWG/libredwg). The binary is auto-detected from `PATH`, or you can specify it with `--dwg-2-dxf`.
 
-Download LibreDWG: https://github.com/LibreDWG/libredwg/releases/tag/0.13.3.7906
+Download LibreDWG: https://github.com/LibreDWG/libredwg/releases
 
 On Debian/Ubuntu:
 

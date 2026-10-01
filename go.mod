@@ -6,7 +6,7 @@ toolchain go1.26.8
 
 require (
 	github.com/alecthomas/kong v1.16.1
-	github.com/kedazo/dxf-go v0.2.3-0.20261001081937-9ae8ea34d6cb
+	github.com/kedazo/dxf-go v0.2.3-0.20261001084043-21c5a2be2ccb
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	golang.org/x/text v0.42.0
 )
