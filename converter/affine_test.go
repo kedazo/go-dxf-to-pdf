@@ -162,4 +162,20 @@ func TestResolveStyleInheritance(t *testing.T) {
 	if rgb, _ := resolveStyle(tc, layers, topCtx); rgb != (RGB{0x12, 0x34, 0x56}) {
 		t.Errorf("true color = %v, want #123456", rgb)
 	}
+
+	// True color black is a color, not "unset".
+	black := dxf.NewLine()
+	black.SetColor(dxf.Color(1))
+	black.SetColor24Bit(0)
+	if rgb, _ := resolveStyle(black, layers, topCtx); rgb != (RGB{}) {
+		t.Errorf("true color black = %v, want black", rgb)
+	}
+
+	// ByLayer takes the layer's true color over its ACI.
+	tl := dxf.NewLine()
+	tl.SetLayer("TC")
+	tlLayers := map[string]dxf.Layer{"TC": {Name: "TC", Color: dxf.Color(1), Color24Bit: 0x00FF80, HasColor24Bit: true}}
+	if rgb, _ := resolveStyle(tl, tlLayers, topCtx); rgb != (RGB{0, 0xFF, 0x80}) {
+		t.Errorf("layer true color = %v, want #00FF80", rgb)
+	}
 }

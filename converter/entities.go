@@ -462,11 +462,12 @@ func resolveStyle(entity dxf.Entity, layers map[string]dxf.Layer, ctx drawCtx) (
 	var rgb RGB
 	entColor := entity.Color()
 	switch {
-	case entity.Color24Bit() != 0:
-		c := entity.Color24Bit()
-		rgb = RGB{uint8(c >> 16), uint8(c >> 8), uint8(c)}
+	case entity.HasColor24Bit():
+		rgb = trueColorRGB(entity.Color24Bit())
 	case entColor == dxf.ByLayer():
-		if hasLayer {
+		if hasLayer && layer.HasColor24Bit {
+			rgb = trueColorRGB(layer.Color24Bit)
+		} else if hasLayer {
 			// A negative layer color only means "layer off"; keep the hue.
 			idx := int16(layer.Color)
 			if idx < 0 {
@@ -491,6 +492,11 @@ func resolveStyle(entity dxf.Entity, layers map[string]dxf.Layer, ctx drawCtx) (
 	}
 
 	return rgb, lw
+}
+
+// trueColorRGB splits a 0xRRGGBB true color.
+func trueColorRGB(c int) RGB {
+	return RGB{uint8(c >> 16), uint8(c >> 8), uint8(c)}
 }
 
 // ComputeBoundingBox computes the bounding box of all entities in world coordinates.
