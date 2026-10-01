@@ -177,12 +177,19 @@ type WallSegmentsResult struct {
 // WallSegmentsDoc is the root of the emitted XML. Coordinates and lengths are in
 // meters; the Y axis points DOWN, matching the PNG the tool renders with
 // --auto-paper --margin 0 so segments overlay the raster 1:1.
+//
+// Version 2 adds the drawing's own structure (wallstructure.go): elements,
+// closed polygons and attributed stamps, and an elem id on every segment.
+// Version 1 readers ignore the new elements and attributes.
 type WallSegmentsDoc struct {
 	XMLName  xml.Name     `xml:"wallExport"`
 	Version  string       `xml:"version,attr"`
 	Meta     XMLMeta      `xml:"meta"`
+	Elements []XMLElement `xml:"elements>element"`
 	Segments []XMLSegment `xml:"segments>segment"`
 	Walls    []XMLWall    `xml:"walls>wall"`
+	Polygons []XMLPolygon `xml:"polygons>polygon"`
+	Stamps   []XMLStamp   `xml:"stamps>stamp"`
 }
 
 // XMLMeta records the coordinate convention and the mapping back to DXF space so
@@ -218,6 +225,7 @@ type XMLSegment struct {
 	LineWeight float64 `xml:"lineWeight,attr"` // meters
 	Source     string  `xml:"source,attr"`     // LINE | LWPOLYLINE | POLYLINE | ARC | CIRCLE
 	Arc        bool    `xml:"arc,attr,omitempty"`
+	Elem       int     `xml:"elem,attr"` // top-level element id (see <elements>), -1 = none
 }
 
 // XMLWall is a detected wall: a centerline plus a single thickness scalar.
@@ -239,6 +247,7 @@ type rawSeg struct {
 	LineWeightMM   float64
 	Source         string
 	IsArc          bool // polyline bulge chord / sampled curve: kept raw, excluded from pairing
+	Elem           int  // top-level element id, -1 = a top-level entity that is not an INSERT
 }
 
 // segGeom is a raw segment already mapped to scene-meters, fed to wall detection.
@@ -316,10 +325,25 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 	}
 
 	// Collect raw segments in DXF world coordinates (identity insert transform).
+	// Each top-level INSERT is an element; what it draws carries its id.
 	var raws []rawSeg
+	var structure wallStructure
 	ctx := plotted(sel, layerMap)
-	for _, ent := range entities {
+	structCtx := plotted(nil, layerMap) // structure ignores --layers (see wallstructure.go)
+	flatTol := 0.01 / unitToMeters      // flatten arcs to within 1 cm
+	for i, ent := range entities {
+		elem := -1
+		if ins, ok := ent.(*dxf.Insert); ok {
+			elem = len(structure.elements)
+			structure.elements = append(structure.elements,
+				XMLElement{ID: elem, Block: ins.Name, Layer: ent.Layer()})
+		}
+		first := len(raws)
 		collectSegments(&raws, ent, layerMap, blockMap, opts, ctx)
+		for j := first; j < len(raws); j++ {
+			raws[j].Elem = elem
+		}
+		collectStructure(&structure, entities[i], elem, layerMap, blockMap, structCtx, flatTol)
 	}
 
 	// DXF world -> scene meters (Y-down, PNG-aligned). Mirrors transform.go X/Y
@@ -343,6 +367,7 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 			LineWeight: round6(rs.LineWeightMM / 1000.0),
 			Source:     rs.Source,
 			Arc:        rs.IsArc,
+			Elem:       rs.Elem,
 		})
 		geoms = append(geoms, segGeom{
 			x1: x1, y1: y1, x2: x2, y2: y2,
@@ -351,9 +376,10 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 	}
 
 	walls := detectWalls(geoms, opts)
+	polygons, stamps := structureXML(&structure, sx, sy)
 
 	doc := WallSegmentsDoc{
-		Version: "1",
+		Version: "2",
 		Meta: XMLMeta{
 			Units:             "meters",
 			SourceUnits:       unitName,
@@ -375,8 +401,11 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 			SegmentCount: len(segments),
 			WallCount:    len(walls),
 		},
+		Elements: structure.elements,
 		Segments: segments,
 		Walls:    walls,
+		Polygons: polygons,
+		Stamps:   stamps,
 	}
 
 	out, err := xml.MarshalIndent(doc, "", "  ")
