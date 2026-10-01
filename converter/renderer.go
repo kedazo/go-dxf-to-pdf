@@ -61,6 +61,8 @@ type Renderer struct {
 	overlays     []*canvas.Canvas
 	rasterTol    float64                   // > 0: strokes are outlined here, with this tolerance (SetRasterStrokes)
 	textCut      bool                      // text across the clip rect is cut as outlines (SetTextCut)
+	textLines    map[shapedKey]*canvas.Text // laid-out text, reused by the tiles (textLine)
+	textWidths   map[shapedKey]float64
 	hatchCache   map[hatchKey][][4]float64 // pattern hatch lines, by hatch and scale
 	hatchCached  int                       // segments held in hatchCache
 	imageFiles   map[*dxf.Image]string
@@ -471,10 +473,24 @@ func strokeOutline(p *canvas.Path, w, tolerance float64) (outline *canvas.Path) 
 // clipPath clips a (multi-subpath) stroke path to a rectangle. Path.Clip only
 // handles straight segments, and it joins consecutive subpaths that are both
 // inside with a LineTo, so each subpath is flattened and clipped on its own.
+//
+// Bounds come first: paths and subpaths inside the rectangle are kept as
+// they are (curves too), those outside dropped, and only the ones crossing
+// its edge are flattened and clipped.
 func clipPath(p *canvas.Path, c canvas.Rect) *canvas.Path {
+	inside := func(b canvas.Rect) bool { return b.X0 >= c.X0 && b.X1 <= c.X1 && b.Y0 >= c.Y0 && b.Y1 <= c.Y1 }
+	if inside(p.FastBounds()) {
+		return p
+	}
 	clipped := &canvas.Path{}
-	for _, sp := range p.Flatten(canvas.Tolerance).Split() {
-		clipped = clipped.Append(sp.Clip(c.X0, c.Y0, c.X1, c.Y1))
+	for _, sp := range p.Split() {
+		switch b := sp.FastBounds(); {
+		case b.X1 < c.X0 || b.X0 > c.X1 || b.Y1 < c.Y0 || b.Y0 > c.Y1:
+		case inside(b):
+			clipped = clipped.Append(sp)
+		default:
+			clipped = clipped.Append(sp.Flatten(canvas.Tolerance).Clip(c.X0, c.Y0, c.X1, c.Y1))
+		}
 	}
 	return clipped
 }
@@ -729,6 +745,45 @@ func (r *Renderer) textFace(look textLook, heightMM float64, col color.RGBA, sty
 	return look.font.face(heightMM, col, style)
 }
 
+// shapedKey identifies laid-out text: a face (faces are reused, see
+// fontSet.face) and a string.
+type shapedKey struct {
+	face *canvas.FontFace
+	s    string
+}
+
+// maxShapedTexts bounds the text lines (and widths) kept for reuse.
+const maxShapedTexts = 100_000
+
+// textLine returns the laid-out line of s, shaping it once per face: tiles
+// and repeated labels draw the same text again and again.
+func (r *Renderer) textLine(face *canvas.FontFace, s string) *canvas.Text {
+	key := shapedKey{face, s}
+	if t, ok := r.textLines[key]; ok {
+		return t
+	}
+	if r.textLines == nil || len(r.textLines) >= maxShapedTexts {
+		r.textLines = map[shapedKey]*canvas.Text{}
+	}
+	t := canvas.NewTextLine(face, s, canvas.Left)
+	r.textLines[key] = t
+	return t
+}
+
+// textWidth returns the advance width of s in the face, measured once.
+func (r *Renderer) textWidth(face *canvas.FontFace, s string) float64 {
+	key := shapedKey{face, s}
+	if w, ok := r.textWidths[key]; ok {
+		return w
+	}
+	if r.textWidths == nil || len(r.textWidths) >= maxShapedTexts {
+		r.textWidths = map[shapedKey]float64{}
+	}
+	w := face.TextWidth(s)
+	r.textWidths[key] = w
+	return w
+}
+
 // drawTextLine draws a text line with its baseline origin at (x, y),
 // stretched horizontally by sx and slanted by obliqueDeg.
 func (r *Renderer) drawTextLine(x, y float64, line *canvas.Text, sx, obliqueDeg float64) {
@@ -822,7 +877,7 @@ func (r *Renderer) DrawText(x, y float64, text string, heightMM, rotationDeg, hA
 	scaledH := max(r.transform.Dist(heightMM), minTextHeightMM)
 
 	face := r.textFace(look, scaledH, r.color, look.style)
-	textLine := canvas.NewTextLine(face, text, canvas.Left)
+	textLine := r.textLine(face, text)
 	width := textLine.Bounds().W() * look.width
 	if r.outsideClip(px, py, width+2*scaledH) {
 		return
@@ -1110,11 +1165,11 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			num, den := seg.Style.Numerator, seg.Style.Denominator
 			face := r.textFace(look, max(scaledH*mtextStackScale, minTextHeightMM), textColor, fontStyle)
 			it := mtextItem{seg: seg, look: look, h: scaledH, col: textColor,
-				line: canvas.NewTextLine(face, num, canvas.Left), den: canvas.NewTextLine(face, den, canvas.Left)}
+				line: r.textLine(face, num), den: r.textLine(face, den)}
 			if seg.Style.StackType == dxf.MTextStackDiagonal { // side by side, divided by a slash
-				it.width = (face.TextWidth(num) + face.TextWidth(den) + scaledH*0.3) * look.width
+				it.width = (r.textWidth(face, num) + r.textWidth(face, den) + scaledH*0.3) * look.width
 			} else {
-				it.width = max(face.TextWidth(num), face.TextWidth(den)) * look.width
+				it.width = max(r.textWidth(face, num), r.textWidth(face, den)) * look.width
 			}
 			it.ink = it.width
 			place(it, it.width)
@@ -1137,12 +1192,12 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				tab(seg.Style.Paragraph)
 				continue
 			}
-			ink := face.TextWidth(strings.TrimRight(piece, " ")) * look.width // trailing spaces may hang over
+			ink := r.textWidth(face, strings.TrimRight(piece, " ")) * look.width // trailing spaces may hang over
 			if t := seg.Style.Tracking; t > 0 && math.Abs(t-1) > 1e-9 {
 				// \T: each character on its own, its advance scaled.
 				wrapInk := ink * t
 				for _, ch := range piece {
-					textLine := canvas.NewTextLine(face, string(ch), canvas.Left)
+					textLine := r.textLine(face, string(ch))
 					adv := textLine.Bounds().W() * look.width
 					it := mtextItem{seg: seg, line: textLine, look: look, width: adv * t, ink: adv, h: scaledH, rise: dy, col: textColor}
 					if ch == ' ' {
@@ -1153,7 +1208,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				}
 				continue
 			}
-			textLine := canvas.NewTextLine(face, piece, canvas.Left)
+			textLine := r.textLine(face, piece)
 			w := textLine.Bounds().W() * look.width
 			place(mtextItem{seg: seg, line: textLine, look: look, width: w, ink: ink, space: strings.HasSuffix(piece, " "),
 				h: scaledH, rise: dy, col: textColor}, ink)

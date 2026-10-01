@@ -17,6 +17,7 @@ const (
 type lineTypes struct {
 	patterns map[string][]float64 // upper-cased name → DXF lengths (+dash, −gap, 0 dot)
 	scale    float64              // $LTSCALE
+	byName   map[string][]float64 // pattern lookups by the name as written (one conversion, one goroutine)
 }
 
 func newLineTypes(d *dxf.Drawing) *lineTypes {
@@ -37,7 +38,16 @@ func (lt *lineTypes) pattern(name string) []float64 {
 	if lt == nil || name == "" || len(lt.patterns) == 0 {
 		return nil
 	}
-	return lt.patterns[strings.ToUpper(name)]
+	// Every entity asks: remember the answer instead of upper-casing again.
+	if p, ok := lt.byName[name]; ok {
+		return p
+	}
+	if lt.byName == nil {
+		lt.byName = make(map[string][]float64)
+	}
+	p := lt.patterns[strings.ToUpper(name)]
+	lt.byName[name] = p
+	return p
 }
 
 // lineTypeName returns the line type an entity is drawn with: BYLAYER takes

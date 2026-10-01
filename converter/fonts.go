@@ -110,6 +110,13 @@ type fontSet struct {
 	loaded    [4]bool
 	capRatio  float64 // cap height / em size, measured on first use
 	widthComp float64
+	faces     map[faceKey]*canvas.FontFace // reused, so laid-out text can be cached per face
+}
+
+type faceKey struct {
+	capHeightMM float64
+	col         color.RGBA
+	style       canvas.FontStyle
 }
 
 // face returns a face of the given cap height (CAD text height is the height
@@ -133,8 +140,20 @@ func (fs *fontSet) face(capHeightMM float64, col color.RGBA, style canvas.FontSt
 			fs.capRatio = m.CapHeight / (100 / 2.83465)
 		}
 	}
-	return fs.family.Face(capHeightMM/fs.capRatio*2.83465, col, style, canvas.FontNormal) // mm → pt
+	key := faceKey{capHeightMM, col, style}
+	if f, ok := fs.faces[key]; ok {
+		return f
+	}
+	if fs.faces == nil || len(fs.faces) >= maxCachedFaces {
+		fs.faces = map[faceKey]*canvas.FontFace{}
+	}
+	f := fs.family.Face(capHeightMM/fs.capRatio*2.83465, col, style, canvas.FontNormal) // mm → pt
+	fs.faces[key] = f
+	return f
 }
+
+// maxCachedFaces bounds the faces a font keeps (text heights × colours).
+const maxCachedFaces = 4096
 
 // FontSubstitute returns the font file text in the given CAD font (file
 // and/or TrueType family, bold/italic face) is drawn with (fontDir as for
