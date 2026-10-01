@@ -359,6 +359,19 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		for _, v := range e.Vertices {
 			expand(m, v.X, v.Y)
 		}
+	case *dxf.Table:
+		expandBBoxForEntity(bb, tableInsert(e), blocks, ctx)
+	case *dxf.MLeader:
+		// The content block is left out: resolving it takes the drawing.
+		paths, text, _ := mleaderParts(e, nil)
+		for _, path := range paths {
+			for _, p := range path {
+				expand(m, p.X, p.Y)
+			}
+		}
+		if text != nil {
+			expandMText(bb, m, text)
+		}
 	case *dxf.Wipeout:
 		for _, p := range wipeoutPolygon(e) {
 			expand(m, p[0], p[1])
@@ -538,6 +551,12 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 
 	case *dxf.Leader:
 		renderLeader(r, e, layers, blocks, ctx, rgb)
+
+	case *dxf.MLeader:
+		renderMLeader(r, e, layers, blocks, ctx, rgb)
+
+	case *dxf.Table:
+		renderEntity(r, tableInsert(e), layers, blocks, ctx)
 
 	case *dxf.Image:
 		renderImage(r, e, m)

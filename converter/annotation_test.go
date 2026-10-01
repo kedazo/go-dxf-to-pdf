@@ -41,6 +41,79 @@ func TestLeaderArrows(t *testing.T) {
 	assertPoint(t, "body", x, y, 5, 3)
 }
 
+// A table shows its "*T" block at its insertion point.
+func TestTableAsInsert(t *testing.T) {
+	blk := dxf.NewBlock()
+	blk.Name = "*T1"
+	line := dxf.NewLine()
+	line.P2 = dxf.Point{X: 5, Y: 2}
+	blk.Entities = append(blk.Entities, line)
+
+	table := &dxf.Table{BlockName: "*T1", InsertionPoint: dxf.Point{X: 10, Y: 1}}
+	table.SetIsVisible(true)
+	table.SetLayer("TABLES")
+	bb := ComputeBoundingBox([]dxf.Entity{table}, map[string]*dxf.Block{"*T1": blk})
+	if bb != (BBox{MinX: 10, MinY: 1, MaxX: 15, MaxY: 3}) {
+		t.Errorf("table bbox = %+v, want (10,1)-(15,3)", bb)
+	}
+	if ins := tableInsert(table); ins.Layer() != "TABLES" || ins.Name != "*T1" {
+		t.Errorf("table insert = %q on %q", ins.Name, ins.Layer())
+	}
+}
+
+func TestMLeaderParts(t *testing.T) {
+	ml := &dxf.MLeader{
+		Scale:     1,
+		ArrowSize: 0.5,
+		Leaders: []dxf.MLeaderLeader{{
+			LastLeaderPoint: dxf.Point{X: 10, Y: 10},
+			DoglegVector:    dxf.Vector{X: 1},
+			DoglegLength:    2,
+			Lines:           [][]dxf.Point{{{X: 0, Y: 0}, {X: 5, Y: 8}}},
+		}},
+		HasText:           true,
+		Text:              "Note",
+		TextLocation:      dxf.Point{X: 13, Y: 11},
+		TextHeight:        1,
+		HasBlock:          true,
+		BlockRecordHandle: 0x42,
+		BlockScale:        dxf.Vector{X: 1, Y: 1, Z: 1},
+		BlockLocation:     dxf.Point{X: 20, Y: 20},
+		BlockNormal:       dxf.Vector{Z: 1},
+	}
+	ml.SetIsVisible(true)
+	paths, text, block := mleaderParts(ml, map[dxf.Handle]string{0x42: "TAG"})
+	want := []dxf.Point{{X: 0, Y: 0}, {X: 5, Y: 8}, {X: 10, Y: 10}, {X: 12, Y: 10}}
+	if len(paths) != 1 || len(paths[0]) != len(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[0][i] != want[i] {
+			t.Errorf("path point %d = %v, want %v", i, paths[0][i], want[i])
+		}
+	}
+	if text == nil || text.Text != "Note" || text.InsertionPoint != ml.TextLocation {
+		t.Errorf("text = %+v", text)
+	}
+	if block == nil || block.Name != "TAG" || block.Location != (dxf.Point{X: 20, Y: 20}) {
+		t.Errorf("content block = %+v", block)
+	}
+
+	// Drawn: lines, arrow, text; the frame covers the arrow tip and the text.
+	bb := ComputeBoundingBox([]dxf.Entity{ml}, nil)
+	if bb.MinX != 0 || bb.MinY != 0 || bb.MaxX <= 13 {
+		t.Errorf("multileader bbox = %+v", bb)
+	}
+	paper := PaperSize{Width: 100, Height: 100}
+	r := NewRenderer(paper, false, 0, "")
+	r.SetTransform(NewTransform(BBox{MaxX: 100, MaxY: 100}, 1, paper, 0, AlignTopLeft, false))
+	renderEntity(r, ml, nil, nil, topCtx)
+	r.flush()
+	if r.c.Empty() {
+		t.Error("nothing drawn")
+	}
+}
+
 func TestWipeoutPolygon(t *testing.T) {
 	w := dxf.NewWipeout()
 	w.SetLocation(dxf.Point{X: 10, Y: 20})
