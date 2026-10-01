@@ -69,6 +69,33 @@ func hatchFillColor(h *dxf.Hatch, entity RGB) RGB {
 	return entity
 }
 
+// maxCachedHatchSegs caps the hatch lines kept for reuse (~64 MB).
+const maxCachedHatchSegs = 2_000_000
+
+// hatchKey identifies the fill lines of a hatch drawn at one scale.
+type hatchKey struct {
+	h                 *dxf.Hatch
+	dotLen, tolerance float64
+}
+
+// hatchLines returns the fill lines of a pattern hatch, reusing those of an
+// earlier draw at the same scale (other tiles, other block inserts).
+func (r *Renderer) hatchLines(h *dxf.Hatch, dotLen, tolerance float64) [][4]float64 {
+	key := hatchKey{h, dotLen, tolerance}
+	if lines, ok := r.hatchCache[key]; ok {
+		return lines
+	}
+	lines := generateHatchFillLines(h, dotLen, tolerance)
+	if r.hatchCached+len(lines) <= maxCachedHatchSegs {
+		if r.hatchCache == nil {
+			r.hatchCache = map[hatchKey][][4]float64{}
+		}
+		r.hatchCache[key] = lines
+		r.hatchCached += len(lines)
+	}
+	return lines
+}
+
 // generateHatchFillLines generates all fill lines for a pattern hatch.
 // Returns line segments in the hatch's object coordinates as [x1, y1, x2, y2].
 // All boundary loops are clipped together with the even-odd rule, so islands

@@ -58,6 +58,8 @@ type Renderer struct {
 	overlay      *canvas.Canvas
 	pageRects    []*canvas.Rect // of the completed pages
 	overlays     []*canvas.Canvas
+	hatchCache   map[hatchKey][][4]float64 // pattern hatch lines, by hatch and scale
+	hatchCached  int                       // segments held in hatchCache
 	imageFiles   map[*dxf.Image]string
 	images       map[string]image.Image // decoded image files
 	wipeoutFrame bool                   // WIPEOUTFRAME 1: wipeout outlines plot

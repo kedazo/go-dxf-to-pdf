@@ -674,7 +674,7 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 			r.FillPolygons(world, hatchFillColor(e, rgb))
 		} else if len(e.PatternLines) > 0 {
 			r.SetStyle(rgb, 0.05) // thin lines for hatch fill
-			lines := generateHatchFillLines(e, dotLen, tolerance)
+			lines := r.hatchLines(e, dotLen, tolerance)
 			for _, seg := range lines {
 				x1, y1 := om.apply(seg[0], seg[1])
 				x2, y2 := om.apply(seg[2], seg[3])

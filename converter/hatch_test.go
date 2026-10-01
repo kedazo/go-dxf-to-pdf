@@ -36,6 +36,25 @@ func TestHatchHoleStaysEmpty(t *testing.T) {
 	}
 }
 
+// A hatch's lines are generated once per scale and reused.
+func TestHatchLinesCached(t *testing.T) {
+	h := parseHatch(t, "2\nANSI31\n70\n0\n71\n0\n91\n1\n92\n1\n93\n4\n"+
+		"72\n1\n10\n0\n20\n0\n11\n10\n21\n0\n72\n1\n10\n10\n20\n0\n11\n10\n21\n10\n"+
+		"72\n1\n10\n10\n20\n10\n11\n0\n21\n10\n72\n1\n10\n0\n20\n10\n11\n0\n21\n0\n"+
+		"97\n0\n75\n0\n76\n1\n52\n0\n41\n1\n77\n0\n78\n1\n53\n0\n43\n0\n44\n0\n45\n0\n46\n1\n79\n0\n98\n0\n")
+	r := NewRenderer(PaperSize{Width: 100, Height: 100}, false, 0, "")
+	a := r.hatchLines(h, 0.1, 0.01)
+	if len(a) == 0 {
+		t.Fatal("no hatch lines")
+	}
+	if b := r.hatchLines(h, 0.1, 0.01); &b[0] != &a[0] || r.hatchCached != len(a) {
+		t.Error("second draw at the same scale regenerated the lines")
+	}
+	if c := r.hatchLines(h, 0.05, 0.005); len(c) == 0 || &c[0] == &a[0] {
+		t.Error("another scale reused the lines")
+	}
+}
+
 // Lines that touch a boundary vertex or run along an edge must keep the
 // even-odd pairing intact for the rest of the line.
 func TestLineIntervalsDegenerateContacts(t *testing.T) {
