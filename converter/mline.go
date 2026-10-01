@@ -9,9 +9,9 @@ import (
 // mlineElements returns the drawn pieces of a MLINE's elements (WCS). Each
 // element at a vertex lies along the vertex's miter direction, at its miter
 // offset (in drawing units, justification and scale already applied). Along
-// a segment an element starts at its start offset and, where MLEDIT cut it,
-// alternates dashes and gaps; past the listed lengths a gap ends the element
-// for that segment and a dash runs on to its end. Unbroken elements come out
+// a segment an element starts at its start position and, where MLEDIT cut
+// it, stops and starts again at the listed positions; a last start runs on to
+// the segment's end. Unbroken elements come out
 // as one path through all vertices, so they keep their joins.
 //
 // The MLINESTYLE (caps, fills, element colours and line types) isn't read,
@@ -80,33 +80,24 @@ func mlineElements(e *dxf.MLine) [][]dxf.Point {
 }
 
 // mlinePieces returns the drawn intervals of an element along a segment of
-// the given length, from its parameters (miter offset, start offset, then
-// dash and gap lengths).
+// the given length, from its parameters: the miter offset, then positions
+// measured from the element's miter point where it starts, stops, starts
+// again… (an AutoCAD tee joint stores [-2.13, 0, 3.46, 5.06] for a gap from
+// 3.46 to 5.06). A last start runs to the segment's end.
 func mlinePieces(line []float64, length float64) [][2]float64 {
-	s := 0.0
-	if len(line) > 1 {
-		s = max(line[1], 0)
-	}
-	if len(line) <= 2 {
-		if s >= length {
-			return nil
-		}
-		return [][2]float64{{s, length}}
+	if len(line) <= 1 {
+		return [][2]float64{{0, length}}
 	}
 	var pieces [][2]float64
-	dash := true
-	for _, l := range line[2:] {
-		if s >= length {
-			return pieces
+	pos := line[1:]
+	for k := 0; k < len(pos); k += 2 {
+		s, t := max(pos[k], 0), length
+		if k+1 < len(pos) {
+			t = min(pos[k+1], length)
 		}
-		next := min(s+max(l, 0), length)
-		if dash && next > s {
-			pieces = append(pieces, [2]float64{s, next})
+		if t > s {
+			pieces = append(pieces, [2]float64{s, t})
 		}
-		s, dash = next, !dash
-	}
-	if dash && s < length { // after the last gap the element runs on
-		pieces = append(pieces, [2]float64{s, length})
 	}
 	return pieces
 }

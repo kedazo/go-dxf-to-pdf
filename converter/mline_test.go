@@ -53,10 +53,11 @@ func parseMLine(t *testing.T, vertices string) *dxf.MLine {
 	return ml
 }
 
-// An element cut with MLEDIT has more parameters than its neighbour: dash 3,
-// gap 2, then the rest of the segment.
+// An element cut with MLEDIT has more parameters than its neighbour: the
+// positions where it starts, stops and starts again (0, 3, 5), then it runs
+// to the segment's end.
 func TestMLineCutElement(t *testing.T) {
-	ml := parseMLine(t, mlineVertex("0.0", "74\n4\n41\n0.5\n41\n0.0\n41\n3.0\n41\n2.0\n")+
+	ml := parseMLine(t, mlineVertex("0.0", "74\n4\n41\n0.5\n41\n0.0\n41\n3.0\n41\n5.0\n")+
 		mlineVertex("10.0", "74\n2\n41\n0.5\n41\n0.0\n"))
 	lines := mlineElements(ml)
 	if len(lines) != 3 {
@@ -70,7 +71,12 @@ func TestMLineCutElement(t *testing.T) {
 			t.Errorf("piece %d = %v, want x %v..%v at y %v", k, l, w[0], w[1], ys[k])
 		}
 	}
-	if p := mlinePieces([]float64{0, 1, 2}, 10); len(p) != 1 || p[0] != [2]float64{1, 3} {
-		t.Errorf("start offset 1, dash 2 = %v, want [1 3] and nothing after", p)
+	if p := mlinePieces([]float64{0, 1, 3}, 10); len(p) != 1 || p[0] != [2]float64{1, 3} {
+		t.Errorf("start 1, stop 3 = %v, want [1 3] and nothing after", p)
+	}
+	// An AutoCAD tee joint: the crossing MLINE fills 3.462783..5.060990.
+	if p := mlinePieces([]float64{-2.130943, 0, 3.462783, 5.060990}, 10); len(p) != 2 ||
+		p[0] != [2]float64{0, 3.462783} || p[1] != [2]float64{5.060990, 10} {
+		t.Errorf("tee joint = %v, want [0 3.462783] [5.06099 10]", p)
 	}
 }
