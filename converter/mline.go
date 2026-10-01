@@ -1,49 +1,128 @@
 package converter
 
 import (
+	"math"
+
 	dxf "github.com/kedazo/dxf-go"
 )
 
-// mlineElements returns the lines of a MLINE's elements, through all its
-// vertices (WCS). Each element at a vertex lies along the vertex's miter
-// direction, at a distance that is the element's first parameter (in drawing
-// units, justification and scale already applied).
+// mlineElements returns the drawn pieces of a MLINE's elements (WCS). Each
+// element at a vertex lies along the vertex's miter direction, at its miter
+// offset (in drawing units, justification and scale already applied). Along
+// a segment an element starts at its start offset and, where MLEDIT cut it,
+// alternates dashes and gaps; past the listed lengths a gap ends the element
+// for that segment and a dash runs on to its end. Unbroken elements come out
+// as one path through all vertices, so they keep their joins.
 //
-// The dxf package keeps the element parameters in one flat list, so each
-// element is assumed to have the same number of them; the MLINESTYLE (caps,
-// fills, element colours and line types) isn't read at all, so only the
-// element lines are drawn, in the MLINE's own style. ok is false if the
-// parameters don't fit that layout.
-func mlineElements(e *dxf.MLine) (lines [][]dxf.Point, ok bool) {
-	nv, ne := len(e.Vertices), e.StyleElementCount
-	if nv < 2 || ne < 1 || len(e.MiterDirections) < nv || len(e.Parameters) == 0 || len(e.Parameters)%(nv*ne) != 0 {
-		return nil, false
+// The MLINESTYLE (caps, fills, element colours and line types) isn't read,
+// so the elements are drawn in the MLINE's own style.
+func mlineElements(e *dxf.MLine) [][]dxf.Point {
+	nv := len(e.Vertices)
+	if nv < 2 || len(e.ElementParameters) < nv || len(e.MiterDirections) < nv {
+		return nil
 	}
-	k := len(e.Parameters) / (nv * ne) // parameters per element and vertex
-	lines = make([][]dxf.Point, ne)
-	for j := range lines {
-		lines[j] = make([]dxf.Point, nv)
-		for i := 0; i < nv; i++ {
-			off := e.Parameters[(i*ne+j)*k]
-			v, d := e.Vertices[i], e.MiterDirections[i]
-			lines[j][i] = dxf.Point{X: v.X + d.X*off, Y: v.Y + d.Y*off, Z: v.Z + d.Z*off}
+	ne := len(e.ElementParameters[0])
+	for _, els := range e.ElementParameters[:nv] {
+		ne = min(ne, len(els))
+	}
+	at := func(i, j int) (dxf.Point, bool) {
+		line := e.ElementParameters[i][j].Line
+		if len(line) == 0 {
+			return dxf.Point{}, false
 		}
+		v, d := e.Vertices[i], e.MiterDirections[i]
+		return dxf.Point{X: v.X + d.X*line[0], Y: v.Y + d.Y*line[0], Z: v.Z + d.Z*line[0]}, true
 	}
-	return lines, true
+	segments := nv - 1
+	if e.IsClosed() {
+		segments = nv
+	}
+
+	var paths [][]dxf.Point
+	for j := 0; j < ne; j++ {
+		var cur []dxf.Point // the path being extended
+		end := func() {
+			if len(cur) >= 2 {
+				paths = append(paths, cur)
+			}
+			cur = nil
+		}
+		for i := 0; i < segments; i++ {
+			a, okA := at(i, j)
+			b, okB := at((i+1)%nv, j)
+			if !okA || !okB {
+				end()
+				continue
+			}
+			dx, dy, dz := b.X-a.X, b.Y-a.Y, b.Z-a.Z
+			length := math.Sqrt(dx*dx + dy*dy + dz*dz)
+			if length == 0 {
+				continue
+			}
+			point := func(s float64) dxf.Point {
+				t := s / length
+				return dxf.Point{X: a.X + dx*t, Y: a.Y + dy*t, Z: a.Z + dz*t}
+			}
+			for _, piece := range mlinePieces(e.ElementParameters[i][j].Line, length) {
+				if piece[0] > 1e-9 || cur == nil {
+					end()
+					cur = []dxf.Point{point(piece[0])}
+				}
+				cur = append(cur, point(piece[1]))
+				if piece[1] < length-1e-9 {
+					end()
+				}
+			}
+		}
+		end()
+	}
+	return paths
+}
+
+// mlinePieces returns the drawn intervals of an element along a segment of
+// the given length, from its parameters (miter offset, start offset, then
+// dash and gap lengths).
+func mlinePieces(line []float64, length float64) [][2]float64 {
+	s := 0.0
+	if len(line) > 1 {
+		s = max(line[1], 0)
+	}
+	if len(line) <= 2 {
+		if s >= length {
+			return nil
+		}
+		return [][2]float64{{s, length}}
+	}
+	var pieces [][2]float64
+	dash := true
+	for _, l := range line[2:] {
+		if s >= length {
+			return pieces
+		}
+		next := min(s+max(l, 0), length)
+		if dash && next > s {
+			pieces = append(pieces, [2]float64{s, next})
+		}
+		s, dash = next, !dash
+	}
+	if dash && s < length { // after the last gap the element runs on
+		pieces = append(pieces, [2]float64{s, length})
+	}
+	return pieces
 }
 
 // renderMLine draws a MLINE's element lines.
 func renderMLine(r *Renderer, e *dxf.MLine, m affine) {
-	lines, ok := mlineElements(e)
-	if !ok {
-		return
-	}
-	for _, line := range lines {
+	for _, line := range mlineElements(e) {
 		pts := make([][2]float64, len(line))
 		for i, p := range line {
 			pts[i][0], pts[i][1] = m.apply(p.X, p.Y)
 		}
+		closed := len(line) > 2 && line[0] == line[len(line)-1]
+		if closed {
+			pts = pts[:len(pts)-1]
+		}
 		r.BreakPath()
-		r.DrawPolyline(pts, e.IsClosed())
+		r.DrawPolyline(pts, closed)
 	}
 }

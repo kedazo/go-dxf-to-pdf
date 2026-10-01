@@ -402,8 +402,7 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 			expand(m, v.X, v.Y)
 		}
 	case *dxf.MLine:
-		lines, _ := mlineElements(e)
-		for _, line := range lines {
+		for _, line := range mlineElements(e) {
 			for _, p := range line {
 				expand(m, p.X, p.Y)
 			}
