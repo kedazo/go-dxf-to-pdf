@@ -18,10 +18,11 @@ type leaderArrow struct {
 // leaderArrows resolves arrowheads per dimension style; a style's leader
 // arrow block (DIMLDRBLK) is a handle to a block record.
 type leaderArrows struct {
-	styles   map[string]leaderArrow     // upper-cased dimension style name
-	header   leaderArrow                // $DIMASZ × $DIMSCALE
-	blocks   map[dxf.Handle]string      // block record handle → block name (MULTILEADER content)
-	mleaders map[dxf.Handle]mleaderLook // MLEADERSTYLE handle → its defaults
+	styles     map[string]leaderArrow     // upper-cased dimension style name
+	header     leaderArrow                // $DIMASZ × $DIMSCALE
+	blocks     map[dxf.Handle]string      // block record handle → block name (MULTILEADER content)
+	textStyles map[dxf.Handle]string      // STYLE handle → text style name
+	mleaders   map[dxf.Handle]mleaderLook // MLEADERSTYLE handle → its defaults
 }
 
 // mleaderLook is what a MULTILEADER takes from its MLEADERSTYLE.
@@ -43,6 +44,42 @@ func (la *leaderArrows) mleaderLook(h dxf.Handle) (mleaderLook, bool) {
 	}
 	look, ok := la.mleaders[h]
 	return look, ok
+}
+
+// mleaderLookFor returns how a MULTILEADER looks: its style's defaults with
+// the properties the leader overrides. ok is false when neither applies.
+func (la *leaderArrows) mleaderLookFor(e *dxf.MLeader) (look mleaderLook, ok bool) {
+	look, ok = la.mleaderLook(e.StyleHandle)
+	if !ok {
+		look = mleaderLook{textColor: dxf.ObjectColorByBlock, lineColor: dxf.ObjectColorByBlock, lineWeight: dxf.LineWeightByBlock}
+	}
+	if e.PropertyOverrides == 0 {
+		return look, ok
+	}
+	if e.IsOverridden(dxf.MLeaderOverrideLeaderLineColor) {
+		look.lineColor = e.LeaderLineColor
+	}
+	if e.IsOverridden(dxf.MLeaderOverrideLeaderLineWeight) {
+		look.lineWeight = e.LeaderLineWeight
+	}
+	if e.IsOverridden(dxf.MLeaderOverrideArrowhead) && la != nil {
+		look.arrowBlock = la.blocks[e.ArrowheadHandle]
+	}
+	if e.IsOverridden(dxf.MLeaderOverrideArrowheadSize) {
+		look.arrowSize = e.ArrowheadSize
+	}
+	if e.IsOverridden(dxf.MLeaderOverrideTextStyle) && la != nil {
+		if name := la.textStyles[e.TextStyleHandle]; name != "" {
+			look.textStyle = name
+		}
+	}
+	if e.IsOverridden(dxf.MLeaderOverrideTextAlignment) {
+		look.align = int(e.TextAlignment)
+	}
+	if e.IsOverridden(dxf.MLeaderOverrideTextColor) {
+		look.textColor = e.TextColor
+	}
+	return look, true
 }
 
 // objectColorRGB resolves a style colour; ByLayer and ByBlock (and unset)
@@ -99,6 +136,7 @@ func newLeaderArrows(d *dxf.Drawing) *leaderArrows {
 	for i := range d.Styles {
 		styleNames[d.Styles[i].Handle()] = d.Styles[i].Name
 	}
+	la.textStyles = styleNames
 	la.mleaders = make(map[dxf.Handle]mleaderLook, len(d.MLeaderStyles))
 	for _, s := range d.MLeaderStyles {
 		la.mleaders[s.Handle] = mleaderLook{
@@ -226,7 +264,9 @@ func mleaderParts(e *dxf.MLeader, blockNames map[dxf.Handle]string, look *mleade
 		}
 		copyEntityStyle(e, text)
 		if look != nil { // the style's text style, height and alignment
-			text.TextStyleName = look.textStyle
+			if look.textStyle != "" {
+				text.TextStyleName = look.textStyle
+			}
 			if text.InitialTextHeight <= 0 {
 				text.InitialTextHeight = look.textHeight * mleaderScale(e)
 			}
@@ -254,13 +294,14 @@ func mleaderScale(e *dxf.MLeader) float64 {
 }
 
 // renderMLeader draws a MULTILEADER: leader lines with arrowheads, its text
-// and its content block. Its MLEADERSTYLE supplies what the entity leaves
-// unset: arrow block and size, text style, height and alignment, colours.
+// and its content block. Its MLEADERSTYLE supplies what the entity doesn't
+// override: arrow block and size, text style, height and alignment, colours
+// and line weight.
 func renderMLeader(r *Renderer, e *dxf.MLeader, layers map[string]dxf.Layer, blocks map[string]*dxf.Block,
 	ctx drawCtx, rgb RGB, lw float64) {
 
 	m := ctx.m
-	look, hasStyle := r.leaderArrows.mleaderLook(e.StyleHandle)
+	look, hasStyle := r.leaderArrows.mleaderLookFor(e)
 	var lookPtr *mleaderLook
 	lineRGB, arrowSize, arrowBlock := rgb, e.ArrowSize, ""
 	if hasStyle {
@@ -270,7 +311,7 @@ func renderMLeader(r *Renderer, e *dxf.MLeader, layers map[string]dxf.Layer, blo
 			arrowSize = look.arrowSize * mleaderScale(e)
 		}
 		arrowBlock = look.arrowBlock
-		if look.lineWeight > 0 { // 0 is also what a missing group 92 reads as
+		if look.lineWeight >= 0 { // ByLayer/ByBlock keep the entity's
 			lw = LineWeightToMM(look.lineWeight)
 		}
 	}

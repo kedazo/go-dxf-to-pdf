@@ -153,6 +153,16 @@ func TestMLeaderStyle(t *testing.T) {
 	if text.TextStyleName != "NOTES" || !near(text.InitialTextHeight, 0.5) || text.AttachmentPoint != dxf.AttachmentPointTopCenter {
 		t.Errorf("text = style %q height %v attach %v", text.TextStyleName, text.InitialTextHeight, text.AttachmentPoint)
 	}
+
+	// The leader's own values win where it overrides the style, and only there.
+	ml.StyleHandle = 0x70
+	ml.PropertyOverrides = dxf.MLeaderOverrideLeaderLineColor | dxf.MLeaderOverrideTextAlignment
+	ml.LeaderLineColor, ml.TextAlignment = objColor(0xC3, 5), 2
+	ml.TextColor = objColor(0xC3, 3) // not overridden
+	got, ok := newLeaderArrows(d).mleaderLookFor(ml)
+	if !ok || got.lineColor != ml.LeaderLineColor || got.align != 2 || got.textColor != look.textColor || got.arrowBlock != "DOT" {
+		t.Errorf("overridden look = %+v (ok %v)", got, ok)
+	}
 }
 
 // Pixels outside a clip polygon become transparent.
