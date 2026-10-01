@@ -481,17 +481,7 @@ func resolveStyle(entity dxf.Entity, layers map[string]dxf.Layer, ctx drawCtx) (
 		rgb = ACIToRGB(int16(entColor))
 	}
 
-	var lw float64
-	switch v := entity.LineWeight(); {
-	case v == dxf.LineWeightByBlock:
-		lw = ctx.lw
-	case v == dxf.LineWeightByLayer && hasLayer:
-		lw = LineWeightToMM(layer.LineWeight)
-	default:
-		lw = LineWeightToMM(entity.LineWeight())
-	}
-
-	return rgb, lw
+	return rgb, ResolveLineWeight(entity.LineWeight(), layer.LineWeight, hasLayer, ctx.lw)
 }
 
 // trueColorRGB splits a 0xRRGGBB true color.
@@ -547,12 +537,22 @@ func circleArcAxes(m affine, cx, cy, r float64) (wcx, wcy, ux, uy, vx, vy float6
 
 // arcParams returns the CCW parameter range of an ARC (angles in degrees).
 func arcParams(startDeg, endDeg float64) (t0, t1 float64) {
-	t0 = startDeg * math.Pi / 180
-	t1 = endDeg * math.Pi / 180
-	for t1 <= t0 {
-		t1 += 2 * math.Pi
+	return ccwRange(startDeg*math.Pi/180, endDeg*math.Pi/180)
+}
+
+// ccwRange returns the CCW parameter range from t0 to t1 (radians), with
+// t1 in (t0, t0+2π]: equal angles mean a full turn. Non-finite angles give
+// an empty range.
+func ccwRange(t0, t1 float64) (float64, float64) {
+	if math.IsNaN(t0) || math.IsInf(t0, 0) || math.IsNaN(t1) || math.IsInf(t1, 0) {
+		return 0, 0
 	}
-	return t0, t1
+	sweep := math.Mod(t1-t0, 2*math.Pi)
+	if sweep <= 0 {
+		sweep += 2 * math.Pi
+	}
+	t0 = math.Mod(t0, 2*math.Pi)
+	return t0, t0 + sweep
 }
 
 // ellipseAxes returns the local conjugate semi-axes and parameter range of an
@@ -572,9 +572,7 @@ func ellipseAxes(e *dxf.Ellipse) (ux, uy, vx, vy, t0, t1 float64) {
 	if (t0 == 0 && t1 == 0) || math.Abs(t1-t0-2*math.Pi) < 1e-9 {
 		return ux, uy, vx, vy, 0, 2 * math.Pi
 	}
-	for t1 <= t0 {
-		t1 += 2 * math.Pi
-	}
+	t0, t1 = ccwRange(t0, t1)
 	return ux, uy, vx, vy, t0, t1
 }
 

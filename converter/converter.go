@@ -210,9 +210,12 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		return nil, err
 	}
 
-	paper, err := ParsePaperSize(opts.Paper)
-	if err != nil {
-		return nil, err
+	// Auto-paper computes the paper size, so an empty Paper is fine there.
+	var paper PaperSize
+	if !opts.AutoPaper || opts.Paper != "" {
+		if paper, err = ParsePaperSize(opts.Paper); err != nil {
+			return nil, err
+		}
 	}
 
 	margin := opts.Margin

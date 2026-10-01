@@ -239,6 +239,23 @@ func TestConvertSimpleDXF(t *testing.T) {
 	}
 }
 
+// Library callers using AutoPaper need not pick a paper size.
+func TestConvertAutoPaperWithoutPaper(t *testing.T) {
+	drawing := dxf.NewDrawing()
+	line := dxf.NewLine()
+	line.P2 = dxf.Point{X: 100, Y: 50}
+	drawing.Entities = append(drawing.Entities, line)
+
+	tmpDir := t.TempDir()
+	dxfPath := filepath.Join(tmpDir, "auto.dxf")
+	if err := drawing.SaveFile(dxfPath); err != nil {
+		t.Fatalf("saving DXF: %v", err)
+	}
+	if _, err := Convert(dxfPath, filepath.Join(tmpDir, "auto.pdf"), Options{Scale: "1:1", AutoPaper: true}); err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+}
+
 func TestConvertTiled(t *testing.T) {
 	drawing := dxf.NewDrawing()
 

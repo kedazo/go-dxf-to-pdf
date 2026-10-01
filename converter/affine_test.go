@@ -82,6 +82,40 @@ func TestBulgeArc(t *testing.T) {
 	}
 }
 
+func TestCCWRange(t *testing.T) {
+	for _, tc := range []struct{ t0, t1, w0, w1 float64 }{
+		{0, math.Pi / 2, 0, math.Pi / 2},
+		{3 * math.Pi / 2, math.Pi / 2, 3 * math.Pi / 2, 5 * math.Pi / 2}, // wraps through 0
+		{1, 1, 1, 1 + 2*math.Pi},                                         // equal: full turn
+		{-math.Pi / 2, 0, -math.Pi / 2, 0},
+	} {
+		if g0, g1 := ccwRange(tc.t0, tc.t1); !near(g0, tc.w0) || !near(g1, tc.w1) {
+			t.Errorf("ccwRange(%v, %v) = %v, %v, want %v, %v", tc.t0, tc.t1, g0, g1, tc.w0, tc.w1)
+		}
+	}
+	// Malformed angles must neither hang nor produce huge sweeps.
+	for _, tc := range [][2]float64{{1e300, -1e300}, {math.Inf(1), 0}, {0, math.NaN()}} {
+		if g0, g1 := ccwRange(tc[0], tc[1]); math.IsNaN(g1-g0) || g1-g0 < 0 || g1-g0 > 2*math.Pi+1e-9 {
+			t.Errorf("ccwRange(%v, %v) = %v, %v", tc[0], tc[1], g0, g1)
+		}
+	}
+}
+
+func TestLineWeightHairline(t *testing.T) {
+	if got := LineWeightToMM(0); got != hairlineMM {
+		t.Errorf("line weight 0 = %v mm, want hairline %v", got, hairlineMM)
+	}
+	if got := ResolveLineWeight(dxf.LineWeightByLayer, 0, true, 1); got != hairlineMM {
+		t.Errorf("ByLayer on a 0 layer = %v mm, want hairline", got)
+	}
+	if got := ResolveLineWeight(dxf.LineWeightByLayer, 0, false, 1); got != defaultLineWidthMM {
+		t.Errorf("ByLayer on a missing layer = %v mm, want default", got)
+	}
+	if got := LineWeightToMM(dxf.LineWeightStandard); got != defaultLineWidthMM {
+		t.Errorf("Standard = %v mm, want default", got)
+	}
+}
+
 func TestTextFrameMirrored(t *testing.T) {
 	_, _, rot, h, mirrored := textFrame(scaleAffine(-1, 1), 0, 0, 0)
 	if !mirrored || !near(rot, 0) || !near(h, 1) {
