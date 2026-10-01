@@ -83,6 +83,28 @@ func TestTextCutAtClip(t *testing.T) {
 	}
 }
 
+// Closed shapes clipped by a viewport keep the join at their start point.
+func TestClipStrokesKeepsStartJoin(t *testing.T) {
+	r := &Renderer{clipPoly: [][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}}}
+	square := func(x0, y0, x1, y1 float64) *canvas.Path {
+		p := &canvas.Path{}
+		p.MoveTo(x0, y0)
+		p.LineTo(x1, y0)
+		p.LineTo(x1, y1)
+		p.LineTo(x0, y1)
+		p.Close()
+		return p
+	}
+	// Inside: still a closed square.
+	if got := r.clipStrokes(square(2, 2, 4, 4)).String(); got != "M2 2L4 2L4 4L2 4z" {
+		t.Errorf("inside: %s, want the closed square", got)
+	}
+	// Crossing the right edge, starting inside: one piece through the start.
+	if got := r.clipStrokes(square(6, 2, 14, 4)).String(); got != "M10 4L6 4L6 2L10 2" {
+		t.Errorf("crossing: %s, want one piece around the start corner", got)
+	}
+}
+
 func TestCullEntities(t *testing.T) {
 	in := dxf.NewLine()
 	in.P1, in.P2 = dxf.Point{X: 1, Y: 1}, dxf.Point{X: 2, Y: 2}

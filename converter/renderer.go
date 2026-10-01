@@ -162,24 +162,66 @@ func polygonPath(poly [][2]float64) *canvas.Path {
 
 // clipStrokes cuts a stroke path to the clip polygon; pieces that stay
 // connected remain one subpath.
+//
+// Closed subpaths keep their join at the start point: one left whole is
+// closed again, and in one that was cut the piece through its start point
+// is joined back together.
 func (r *Renderer) clipStrokes(p *canvas.Path) *canvas.Path {
-	var segs [][4]float64
-	for s := p.Flatten(canvas.Tolerance).Scanner(); s.Scan(); {
-		if s.Cmd() == canvas.LineToCmd || s.Cmd() == canvas.CloseCmd {
-			a, b := s.Start(), s.End()
-			segs = append(segs, [4]float64{a.X, a.Y, b.X, b.Y})
+	out := &canvas.Path{}
+	for _, sp := range p.Flatten(canvas.Tolerance).Split() {
+		var segs [][4]float64
+		closed := false
+		for s := sp.Scanner(); s.Scan(); {
+			if s.Cmd() == canvas.LineToCmd || s.Cmd() == canvas.CloseCmd {
+				a, b := s.Start(), s.End()
+				segs = append(segs, [4]float64{a.X, a.Y, b.X, b.Y})
+				closed = closed || s.Cmd() == canvas.CloseCmd
+			}
+		}
+		if len(segs) == 0 {
+			continue
+		}
+		var pieces [][]canvas.Point
+		clipToPolygon(segs, r.clipPoly, func(x1, y1, x2, y2 float64) {
+			if n := len(pieces); n == 0 || !samePoint(pieces[n-1][len(pieces[n-1])-1], canvas.Point{X: x1, Y: y1}) {
+				pieces = append(pieces, []canvas.Point{{X: x1, Y: y1}})
+			}
+			pieces[len(pieces)-1] = append(pieces[len(pieces)-1], canvas.Point{X: x2, Y: y2})
+		})
+		if len(pieces) == 0 {
+			continue
+		}
+		start := canvas.Point{X: segs[0][0], Y: segs[0][1]}
+		first, last := pieces[0], pieces[len(pieces)-1]
+		whole := false
+		if closed && samePoint(first[0], start) && samePoint(last[len(last)-1], start) {
+			if len(pieces) == 1 {
+				whole = true
+			} else { // the last piece runs on into the first
+				pieces[0] = append(last, first[1:]...)
+				pieces = pieces[:len(pieces)-1]
+			}
+		}
+		for _, piece := range pieces {
+			out.MoveTo(piece[0].X, piece[0].Y)
+			end := len(piece)
+			if whole {
+				end-- // the closing segment
+			}
+			for _, q := range piece[1:end] {
+				out.LineTo(q.X, q.Y)
+			}
+			if whole {
+				out.Close()
+			}
 		}
 	}
-	out := &canvas.Path{}
-	var lastX, lastY float64
-	clipToPolygon(segs, r.clipPoly, func(x1, y1, x2, y2 float64) {
-		if out.Empty() || math.Abs(x1-lastX) > 1e-9 || math.Abs(y1-lastY) > 1e-9 {
-			out.MoveTo(x1, y1)
-		}
-		out.LineTo(x2, y2)
-		lastX, lastY = x2, y2
-	})
 	return out
+}
+
+// samePoint reports whether two page points coincide.
+func samePoint(a, b canvas.Point) bool {
+	return math.Abs(a.X-b.X) <= 1e-9 && math.Abs(a.Y-b.Y) <= 1e-9
 }
 
 // SetMinStrokeWidth widens every stroke to at least mm (0 = no minimum).
