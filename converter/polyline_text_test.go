@@ -272,6 +272,34 @@ func TestMTextWrapAndTabs(t *testing.T) {
 	}
 }
 
+// Paragraph codes: explicit tab stops (in text heights), centring in the box,
+// and the stack separator.
+func TestMTextParagraphs(t *testing.T) {
+	if _, err := os.Stat(filepath.Join(DefaultFontDir(), "DejaVuSans.ttf")); err != nil {
+		t.Skip("DejaVu fonts not available")
+	}
+	paper := PaperSize{Width: 200, Height: 200}
+	drawn := func(text string, box float64) canvas.Rect {
+		r := NewRenderer(paper, false, 0, "")
+		r.SetTransform(NewTransform(BBox{MaxX: 200, MaxY: 200}, 1, paper, 0, AlignTopLeft, false))
+		r.DrawMText(10, 150, ParseMText(text), 5, 0, 1, 1, box, textStyle{})
+		return r.c.Bounds()
+	}
+	// Tab stop at 10 text heights (50 mm): "b" ends just after x = 60.
+	if b := drawn(`\pt10;a`+"\t"+`b`, 0); b.X1 < 10+50 || b.X1 > 10+50+5 {
+		t.Errorf("tab stop: text ends at x=%v, want just past 60", b.X1)
+	}
+	// Centred in a 100 mm box from x = 10: the text's middle is near 60.
+	if b := drawn(`\pqc;ab`, 100); math.Abs((b.X0+b.X1)/2-60) > 1 {
+		t.Errorf("centred: text spans %v..%v, want it centred at 60", b.X0, b.X1)
+	}
+	segs := ParseMText(`\S1#2;`)
+	if len(segs) != 1 || !segs[0].Style.Stacked || segs[0].Style.StackType != dxf.MTextStackDiagonal ||
+		segs[0].Style.Numerator != "1" || segs[0].Style.Denominator != "2" {
+		t.Errorf("diagonal stack = %+v", segs)
+	}
+}
+
 func TestParseMTextStacksAndEscapes(t *testing.T) {
 	segs := ParseMText(`288,47 m{\H0.66x;\S2^ ;}`)
 	if len(segs) != 2 || segs[1].Text != "2" || !segs[1].Style.Superscript || segs[1].Style.HeightRelative != 0.66 {

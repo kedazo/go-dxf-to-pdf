@@ -24,7 +24,13 @@ type MTextStyle struct {
 	Strikethrough  bool
 	Superscript    bool // \Sx^; stack (e.g. the 2 of m²)
 	Subscript      bool // \S^x; stack
-	Stacked        bool // \Sa/b; fraction: Text is "a/b"
+	Stacked        bool // \Sa/b; \Sa#b; \Sa^b; with both parts: a stacked fraction
+	StackType      dxf.MTextStackType
+	Numerator      string
+	Denominator    string
+
+	VerticalAlignment dxf.MTextVerticalAlignment // \A
+	Paragraph         dxf.MTextParagraph         // \p…; (alignment, indents, tab stops)
 }
 
 // MTextSegment is a piece of text with uniform style.
@@ -55,7 +61,13 @@ func ParseMText(s string) []MTextSegment {
 			Strikethrough: run.Strike,
 			Superscript:   run.Superscript,
 			Subscript:     run.Subscript,
-			Stacked:       run.Stacked && !run.Superscript && !run.Subscript,
+			Stacked:       run.Stacked && run.StackType != dxf.MTextStackNone && run.Numerator != "" && run.Denominator != "",
+			StackType:     run.StackType,
+			Numerator:     run.Numerator,
+			Denominator:   run.Denominator,
+
+			VerticalAlignment: run.VerticalAlignment,
+			Paragraph:         run.Paragraph,
 		}
 		if run.HeightFactor != 1 {
 			style.HeightRelative = run.HeightFactor

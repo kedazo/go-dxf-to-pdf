@@ -664,10 +664,14 @@ type mtextItem struct {
 	col   color.RGBA
 }
 
-// mtextTabStops is the default distance of MText tab stops, in text
-// heights. (AutoCAD's own default is unverified; MText paragraph codes with
-// explicit tab stops aren't available from the parser yet.)
+// mtextTabStops is the distance of the default MText tab stops, in text
+// heights, used where a paragraph sets none (AutoCAD's own default is
+// unverified).
 const mtextTabStops = 4
+
+// mtextWrapSlack widens an MText box for wrapping: boxes are often fitted
+// to the text in the original font, which ours only approximates.
+const mtextWrapSlack = 1.03
 
 // mtextStackScale is the height of a stacked fraction's parts, as a share
 // of the text height.
@@ -697,12 +701,43 @@ func splitMTextRun(text string, words bool) []string {
 	return pieces
 }
 
+// drawStack draws a stacked fraction item with its left edge at x on the
+// baseline y: one part above the other, with a bar between them (a/b) or
+// without (a^b), or side by side with a slash (a#b).
+func (r *Renderer) drawStack(it mtextItem, x, y float64) {
+	numW, denW := it.line.Bounds().W()*it.look.width, it.den.Bounds().W()*it.look.width
+	line := func(x1, y1, x2, y2 float64) {
+		r.ctx.Push()
+		r.ctx.SetStrokeColor(it.col)
+		r.ctx.SetStrokeWidth(max(it.h*0.05, r.minStrokeMM))
+		r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
+		p := &canvas.Path{}
+		p.MoveTo(x1, y1)
+		p.LineTo(x2, y2)
+		r.ctx.DrawPath(0, 0, p)
+		r.ctx.Pop()
+	}
+	if it.seg.Style.StackType == dxf.MTextStackDiagonal {
+		gap := it.width - numW - denW
+		r.drawTextLine(x, y-it.h*0.45, it.line, it.look.width, it.look.oblique)
+		r.drawTextLine(x+numW+gap, y+it.h*0.1, it.den, it.look.width, it.look.oblique)
+		line(x+numW+gap*0.15, y+it.h*0.1, x+numW+gap*0.85, y-it.h*0.95)
+		return
+	}
+	r.drawTextLine(x+(it.width-numW)/2, y-it.h*0.7, it.line, it.look.width, it.look.oblique)
+	r.drawTextLine(x+(it.width-denW)/2, y+it.h*0.35, it.den, it.look.width, it.look.oblique)
+	if it.seg.Style.StackType != dxf.MTextStackTolerance {
+		line(x, y-it.h*0.5, x+it.width, y-it.h*0.5)
+	}
+}
+
 // DrawMText draws multi-line formatted text. attach is the DXF attachment
 // point (1..9: top/middle/bottom × left/center/right); lineSpacing is the
-// MTEXT line spacing factor (0 = default 1.0); wrapWidthMM is the width the
-// lines wrap at (0 = no wrapping); style is the text style, whose font and
-// face apply where the text sets no font.
-func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing, wrapWidthMM float64, style textStyle) {
+// MTEXT line spacing factor (0 = default 1.0); boxWidthMM is the MTEXT's
+// box width, which lines wrap at and paragraphs align in (0 = no box);
+// style is the text style, whose font and face apply where the text sets no
+// font. Paragraph indents and tab stops are in multiples of the text height.
+func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeightMM, rotationDeg float64, attach int, lineSpacing, boxWidthMM float64, style textStyle) {
 	r.flush()
 	px := r.transform.X(x)
 	py := r.transform.Y(y)
@@ -710,29 +745,62 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	if lineSpacing <= 0 {
 		lineSpacing = 1
 	}
-	tabStop := mtextTabStops * defaultScaledH
+	wrapWidthMM := boxWidthMM * mtextWrapSlack
 
-	// Pass 1: lay out segments into lines (wrapping words at wrapWidthMM,
-	// moving to tab stops) and measure them.
+	// Pass 1: lay out segments into lines (wrapping words at the box width,
+	// indenting paragraphs, moving to tab stops) and measure them.
 	lines := [][]mtextItem{nil}
-	x0 := 0.0 // pen position in the current line
-	newLine := func() {
+	paras := []dxf.MTextParagraph{{}} // the paragraph of each line
+	firstOfPara := []bool{true}
+	x0 := 0.0         // pen position in the current line
+	started := false // the current line has its indent
+	newLine := func(paragraphStart bool) {
 		lines = append(lines, nil)
-		x0 = 0
+		paras = append(paras, dxf.MTextParagraph{})
+		firstOfPara = append(firstOfPara, paragraphStart)
+		x0, started = 0, false
+	}
+	// begin starts a line's content: it takes the paragraph's indent.
+	begin := func(p dxf.MTextParagraph) {
+		if started {
+			return
+		}
+		started = true
+		last := len(lines) - 1
+		paras[last] = p
+		indent := p.LeftIndent
+		if firstOfPara[last] {
+			indent += p.FirstLineIndent
+		}
+		x0 = max(x0, indent*defaultScaledH)
 	}
 	place := func(it mtextItem, inkWidth float64) {
+		begin(it.seg.Style.Paragraph)
 		last := len(lines) - 1
-		if wrapWidthMM > 0 && x0 > 0 && x0+inkWidth > wrapWidthMM {
-			newLine()
+		limit := wrapWidthMM - paras[last].RightIndent*defaultScaledH
+		if wrapWidthMM > 0 && len(lines[last]) > 0 && x0+inkWidth > limit {
+			newLine(false)
+			begin(it.seg.Style.Paragraph)
 			last++
 		}
 		it.x = x0
 		x0 += it.width
 		lines[last] = append(lines[last], it)
 	}
+	tab := func(p dxf.MTextParagraph) {
+		begin(p)
+		for _, stop := range p.TabStops { // centre and right stops are taken as left ones
+			if pos := stop.Position * defaultScaledH; pos > x0+1e-9 {
+				x0 = pos
+				return
+			}
+		}
+		every := mtextTabStops * defaultScaledH
+		x0 = (math.Floor(x0/every+1e-9) + 1) * every
+	}
 	for _, seg := range segments {
 		if seg.NewLine {
-			newLine()
+			newLine(true)
 			continue
 		}
 		if seg.Text == "" {
@@ -777,20 +845,35 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		}
 		look := r.lookWithFont(segFont, segFamily, width, seg.Style.ObliqueAngle)
 
-		// A stacked fraction: numerator over denominator, smaller.
-		if num, den, ok := strings.Cut(seg.Text, "/"); ok && seg.Style.Stacked {
+		// A stacked fraction: numerator and denominator, smaller.
+		if seg.Style.Stacked {
+			num, den := seg.Style.Numerator, seg.Style.Denominator
 			face := r.textFace(look, max(scaledH*mtextStackScale, minTextHeightMM), textColor, fontStyle)
 			it := mtextItem{seg: seg, look: look, h: scaledH, col: textColor,
 				line: canvas.NewTextLine(face, num, canvas.Left), den: canvas.NewTextLine(face, den, canvas.Left)}
-			it.width = max(face.TextWidth(num), face.TextWidth(den)) * look.width
+			if seg.Style.StackType == dxf.MTextStackDiagonal { // side by side, divided by a slash
+				it.width = (face.TextWidth(num) + face.TextWidth(den) + scaledH*0.3) * look.width
+			} else {
+				it.width = max(face.TextWidth(num), face.TextWidth(den)) * look.width
+			}
 			place(it, it.width)
 			continue
+		}
+
+		// \A: a run smaller than the line sits at its bottom, middle or top.
+		if !seg.Style.Superscript && !seg.Style.Subscript && scaledH < defaultScaledH {
+			switch seg.Style.VerticalAlignment {
+			case dxf.MTextVerticalAlignmentCenter:
+				dy += (defaultScaledH - scaledH) / 2
+			case dxf.MTextVerticalAlignmentTop:
+				dy += defaultScaledH - scaledH
+			}
 		}
 
 		face := r.textFace(look, scaledH, textColor, fontStyle)
 		for _, piece := range splitMTextRun(seg.Text, wrapWidthMM > 0) {
 			if piece == "\t" {
-				x0 = (math.Floor(x0/tabStop+1e-9) + 1) * tabStop
+				tab(seg.Style.Paragraph)
 				continue
 			}
 			textLine := canvas.NewTextLine(face, piece, canvas.Left)
@@ -830,10 +913,14 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	for _, items := range lines {
 		maxW = max(maxW, lineWidth(items))
 	}
-	if r.outsideClip(px, py, maxW+n*advance+2*defaultScaledH) {
+	// Paragraphs align within the box, or within the widest line without
+	// one; the box sits at the attachment point.
+	boxW := max(boxWidthMM, maxW)
+	boxLeft := px - hAlign*boxW
+	if r.outsideClip(px, py, boxW+n*advance+2*defaultScaledH) {
 		return
 	}
-	if r.textClippedOut(px, py, px-hAlign*maxW, firstBaseline-defaultScaledH, px+(1-hAlign)*maxW,
+	if r.textClippedOut(px, py, boxLeft, firstBaseline-defaultScaledH, boxLeft+boxW,
 		firstBaseline+(n-1)*advance+defaultScaledH*estDescent, rotationDeg) {
 		return
 	}
@@ -844,27 +931,22 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 	}
 
 	for li, items := range lines {
-		lineX := px - hAlign*lineWidth(items)
+		align := hAlign // the attachment point's, unless the paragraph sets one
+		switch paras[li].Alignment {
+		case dxf.MTextParagraphAlignmentLeft, dxf.MTextParagraphAlignmentJustified, dxf.MTextParagraphAlignmentDistributed:
+			align = 0 // justified and distributed lines are drawn left aligned
+		case dxf.MTextParagraphAlignmentCenter:
+			align = 0.5
+		case dxf.MTextParagraphAlignmentRight:
+			align = 1
+		}
+		lineX := boxLeft + (boxW-lineWidth(items))*align
 		curY := firstBaseline + float64(li)*advance
 
 		for _, it := range items {
 			curX := lineX + it.x
 			if it.den != nil {
-				// Stacked fraction: numerator above a bar, denominator below,
-				// each centred in the item's width.
-				bar := curY - it.h*0.5
-				numW, denW := it.line.Bounds().W()*it.look.width, it.den.Bounds().W()*it.look.width
-				r.drawTextLine(curX+(it.width-numW)/2, curY-it.h*0.7, it.line, it.look.width, it.look.oblique)
-				r.drawTextLine(curX+(it.width-denW)/2, curY+it.h*0.35, it.den, it.look.width, it.look.oblique)
-				r.ctx.Push()
-				r.ctx.SetStrokeColor(it.col)
-				r.ctx.SetStrokeWidth(max(it.h*0.05, r.minStrokeMM))
-				r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0})
-				dp := &canvas.Path{}
-				dp.MoveTo(curX, bar)
-				dp.LineTo(curX+it.width, bar)
-				r.ctx.DrawPath(0, 0, dp)
-				r.ctx.Pop()
+				r.drawStack(it, curX, curY)
 				continue
 			}
 			r.drawTextLine(curX, curY-it.rise, it.line, it.look.width, it.look.oblique)

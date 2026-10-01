@@ -741,14 +741,12 @@ func renderMText(r *Renderer, e *dxf.MText, m affine) {
 		row, col := (attach-1)/3, (attach-1)%3
 		attach = row*3 + (2 - col) + 1
 	}
-	// Lines wrap at the MTEXT's box width (0 = no box), with a little slack:
-	// boxes are often fitted to the text in the original font, which ours
-	// only approximates.
-	wrap := 0.0
-	if box := mtextBoxWidth(e); box > 0 {
-		wrap = r.transform.Dist(box*hScale) * 1.03
+	// Lines wrap at the MTEXT's box width (0 = no box).
+	box := 0.0
+	if w := mtextBoxWidth(e); w > 0 {
+		box = r.transform.Dist(w * hScale)
 	}
-	r.DrawMText(x, y, segments, e.InitialTextHeight*hScale, rot, attach, e.LineSpacingFactor, wrap, r.textStyleNamed(e.TextStyleName))
+	r.DrawMText(x, y, segments, e.InitialTextHeight*hScale, rot, attach, e.LineSpacingFactor, box, r.textStyleNamed(e.TextStyleName))
 }
 
 // expandBulge expands bb with the arc of a bulged polyline edge (local
