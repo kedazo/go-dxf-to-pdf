@@ -755,9 +755,28 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		r.DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4)
 
 	case *dxf.Hatch:
-		if enableHatch && !e.SolidFill && len(e.PatternLines) > 0 {
+		if !enableHatch {
+			break
+		}
+		if e.SolidFill {
+			polys := hatchPolygons(e)
+			world := make([][][2]float64, len(polys))
+			for i, poly := range polys {
+				world[i] = make([][2]float64, len(poly))
+				for j, v := range poly {
+					x, y := m.apply(v[0], v[1])
+					world[i][j] = [2]float64{x, y}
+				}
+			}
+			r.FillPolygons(world, rgb)
+		} else if len(e.PatternLines) > 0 {
 			r.SetStyle(rgb, 0.05) // thin lines for hatch fill
-			lines := generateHatchFillLines(e)
+			// Dots are drawn ~0.15 mm long on paper, whatever the scale.
+			dotLen := 0.15
+			if s := r.transform.Scale * m.linearScale(); s > 0 {
+				dotLen /= s
+			}
+			lines := generateHatchFillLines(e, dotLen)
 			for _, seg := range lines {
 				x1, y1 := m.apply(seg[0], seg[1])
 				x2, y2 := m.apply(seg[2], seg[3])

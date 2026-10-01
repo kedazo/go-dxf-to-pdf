@@ -154,6 +154,31 @@ func (r *Renderer) DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4 float64) {
 	r.ctx.DrawPath(0, 0, p)
 }
 
+// FillPolygons fills a set of closed loops (DXF world coordinates) as one
+// shape with the even-odd rule, so inner loops become holes.
+func (r *Renderer) FillPolygons(polys [][][2]float64, col RGB) {
+	p := &canvas.Path{}
+	for _, poly := range polys {
+		if len(poly) < 3 {
+			continue
+		}
+		p.MoveTo(r.transform.X(poly[0][0]), r.transform.Y(poly[0][1]))
+		for _, v := range poly[1:] {
+			p.LineTo(r.transform.X(v[0]), r.transform.Y(v[1]))
+		}
+		p.Close()
+	}
+	if p.Empty() {
+		return
+	}
+	r.ctx.Push()
+	r.ctx.SetFillColor(color.RGBA{col.R, col.G, col.B, 255})
+	r.ctx.SetStrokeColor(color.RGBA{0, 0, 0, 0})
+	r.ctx.SetFillRule(canvas.EvenOdd)
+	r.ctx.DrawPath(0, 0, p)
+	r.ctx.Pop()
+}
+
 func (r *Renderer) DrawPoint(x, y float64) {
 	px := r.transform.X(x)
 	py := r.transform.Y(y)

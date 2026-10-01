@@ -52,6 +52,11 @@ func (m affine) mul(n affine) affine {
 	}
 }
 
+// linearScale returns the average linear scale factor of m (√|det|).
+func (m affine) linearScale() float64 {
+	return math.Sqrt(math.Abs(m.a*m.d - m.b*m.c))
+}
+
 // ocsAffine returns the XY projection of the Object Coordinate System for the
 // given extrusion direction (DXF "arbitrary axis algorithm"). Entities such as
 // ARC, CIRCLE, LWPOLYLINE, TEXT and INSERT store coordinates in their OCS;

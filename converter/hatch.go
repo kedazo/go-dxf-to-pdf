@@ -10,204 +10,172 @@ import (
 // enableHatch controls whether HATCH entities are rendered.
 const enableHatch = true
 
-// generateHatchFillLines generates all fill lines for a hatch entity.
-// Returns line segments in DXF world coordinates as [x1, y1, x2, y2].
-func generateHatchFillLines(h *dxf.Hatch) [][4]float64 {
-	if h.SolidFill || len(h.Paths) == 0 || len(h.PatternLines) == 0 {
+// Guards against degenerate pattern data (e.g. a near-zero line spacing on a
+// large boundary) producing millions of segments.
+const (
+	maxHatchLinesPerFamily = 20000
+	maxDashesPerInterval   = 100000
+)
+
+// hatchPolygons returns the hatch boundary loops that can enclose an area.
+func hatchPolygons(h *dxf.Hatch) [][][2]float64 {
+	polys := make([][][2]float64, 0, len(h.Paths))
+	for _, p := range h.Paths {
+		if len(p.Vertices) >= 3 {
+			polys = append(polys, p.Vertices)
+		}
+	}
+	return polys
+}
+
+// generateHatchFillLines generates all fill lines for a pattern hatch.
+// Returns line segments in the hatch's coordinates as [x1, y1, x2, y2].
+// All boundary loops are clipped together with the even-odd rule, so islands
+// and holes stay empty. dotLen is the length used for zero-length (dot)
+// dashes, in the same units.
+func generateHatchFillLines(h *dxf.Hatch, dotLen float64) [][4]float64 {
+	if h.SolidFill || len(h.PatternLines) == 0 {
+		return nil
+	}
+	polys := hatchPolygons(h)
+	if len(polys) == 0 {
 		return nil
 	}
 
 	var allLines [][4]float64
-	for _, path := range h.Paths {
-		if len(path.Vertices) < 3 {
-			continue
-		}
-		for _, pl := range h.PatternLines {
-			lines := generatePatternLines(path.Vertices, pl, h.PatternScale)
-			allLines = append(allLines, lines...)
-		}
+	for _, pl := range h.PatternLines {
+		allLines = append(allLines, patternLineSegments(polys, pl, dotLen)...)
 	}
 	return allLines
 }
 
-// generatePatternLines generates fill lines for one pattern line definition
-// clipped to a polygon boundary.
-func generatePatternLines(poly [][2]float64, pl dxf.HatchPatternLine, patScale float64) [][4]float64 {
-	if patScale <= 0 {
-		patScale = 1.0
-	}
-
-	// The offset vector defines the shift between consecutive pattern lines.
-	// The perpendicular distance (spacing) is the magnitude of the offset projected
-	// perpendicular to the line direction.
+// patternLineSegments generates one pattern line family clipped to the
+// boundary loops.
+//
+// The pattern data stored in a HATCH entity is already scaled and rotated
+// (angle, base point and offset are in drawing coordinates), so no further
+// pattern scale is applied. Line k of the family passes through
+// base + k·offset; the offset's component along the line staggers successive
+// lines (brick-like patterns), and dashes are phased from that origin.
+func patternLineSegments(polys [][][2]float64, pl dxf.HatchPatternLine, dotLen float64) [][4]float64 {
 	angleRad := pl.Angle * math.Pi / 180.0
-	dirX := math.Cos(angleRad)
-	dirY := math.Sin(angleRad)
+	dirY, dirX := math.Sincos(angleRad)
+	perpX, perpY := -dirY, dirX
 
-	// Perpendicular direction (left normal)
-	perpX := -dirY
-	perpY := dirX
-
-	// Spacing = dot product of offset vector with perpendicular direction
-	spacing := math.Abs(pl.OffsetX*perpX + pl.OffsetY*perpY) * patScale
-	if spacing < 1e-10 {
+	spacing := pl.OffsetX*perpX + pl.OffsetY*perpY
+	if math.Abs(spacing) < 1e-10 {
 		return nil
 	}
 
-	// Project all polygon vertices onto the perpendicular axis to find range
-	minProj := math.Inf(1)
-	maxProj := math.Inf(-1)
-	for _, v := range poly {
-		proj := v[0]*perpX + v[1]*perpY
-		if proj < minProj {
-			minProj = proj
-		}
-		if proj > maxProj {
-			maxProj = proj
+	// Range of line indices covering the boundary.
+	minProj, maxProj := math.Inf(1), math.Inf(-1)
+	for _, poly := range polys {
+		for _, v := range poly {
+			proj := v[0]*perpX + v[1]*perpY
+			minProj = math.Min(minProj, proj)
+			maxProj = math.Max(maxProj, proj)
 		}
 	}
-
-	// Base point projection (anchor for the pattern grid)
-	baseProj := (pl.BaseX*patScale)*perpX + (pl.BaseY*patScale)*perpY
-
-	// Find the range of line indices
-	startIdx := int(math.Floor((minProj - baseProj) / spacing))
-	endIdx := int(math.Ceil((maxProj - baseProj) / spacing))
-
-	// Compute bounding box extent along line direction for line length
-	minDir := math.Inf(1)
-	maxDir := math.Inf(-1)
-	for _, v := range poly {
-		d := v[0]*dirX + v[1]*dirY
-		if d < minDir {
-			minDir = d
-		}
-		if d > maxDir {
-			maxDir = d
-		}
+	baseProj := pl.BaseX*perpX + pl.BaseY*perpY
+	k0 := (minProj - baseProj) / spacing
+	k1 := (maxProj - baseProj) / spacing
+	if k0 > k1 {
+		k0, k1 = k1, k0
 	}
-	extent := maxDir - minDir
+	startIdx, endIdx := int(math.Floor(k0)), int(math.Ceil(k1))
+	if endIdx-startIdx > maxHatchLinesPerFamily {
+		return nil
+	}
 
 	var result [][4]float64
-
-	// Dash pattern (scaled)
-	var dashes []float64
-	hasDash := len(pl.Dashes) > 0
-	if hasDash {
-		dashes = make([]float64, len(pl.Dashes))
-		for i, d := range pl.Dashes {
-			dashes[i] = d * patScale
+	for k := startIdx; k <= endIdx; k++ {
+		ox := pl.BaseX + float64(k)*pl.OffsetX
+		oy := pl.BaseY + float64(k)*pl.OffsetY
+		emit := func(t0, t1 float64) {
+			result = append(result, [4]float64{
+				ox + t0*dirX, oy + t0*dirY,
+				ox + t1*dirX, oy + t1*dirY,
+			})
+		}
+		for _, iv := range lineIntervals(ox, oy, dirX, dirY, polys) {
+			dashInterval(iv[0], iv[1], pl.Dashes, dotLen, emit)
 		}
 	}
-
-	for i := startIdx; i <= endIdx; i++ {
-		// Line at perpendicular distance = baseProj + i*spacing
-		perpDist := baseProj + float64(i)*spacing
-
-		// A point on this line
-		px := perpDist * perpX
-		py := perpDist * perpY
-
-		// Line extends along (dirX, dirY) — clip to polygon
-		clipped := clipLineToPolygon(px, py, dirX, dirY, extent*2, poly)
-		if hasDash {
-			for _, seg := range clipped {
-				dashed := applyDashPattern(seg, dirX, dirY, dashes)
-				result = append(result, dashed...)
-			}
-		} else {
-			result = append(result, clipped...)
-		}
-	}
-
 	return result
 }
 
-// clipLineToPolygon clips an infinite line (defined by a point and direction)
-// to a polygon using intersection with all edges. Returns inside segments.
-func clipLineToPolygon(px, py, dirX, dirY, extent float64, poly [][2]float64) [][4]float64 {
-	// Parameterize the line as P(t) = (px + t*dirX, py + t*dirY)
-	// Find all intersections with polygon edges
+// lineIntervals intersects the infinite line origin + t·dir with all boundary
+// loops and returns the parameter intervals inside them (even-odd rule).
+func lineIntervals(ox, oy, dirX, dirY float64, polys [][][2]float64) [][2]float64 {
 	var params []float64
-	n := len(poly)
+	for _, poly := range polys {
+		n := len(poly)
+		for i := 0; i < n; i++ {
+			j := (i + 1) % n
+			ex := poly[j][0] - poly[i][0]
+			ey := poly[j][1] - poly[i][1]
 
-	for i := 0; i < n; i++ {
-		j := (i + 1) % n
-		ex := poly[j][0] - poly[i][0]
-		ey := poly[j][1] - poly[i][1]
+			// Solve: o + t·dir = poly[i] + s·e
+			denom := dirX*ey - dirY*ex
+			if math.Abs(denom) < 1e-12 {
+				continue // parallel
+			}
+			dx := poly[i][0] - ox
+			dy := poly[i][1] - oy
+			t := (dx*ey - dy*ex) / denom
+			s := (dx*dirY - dy*dirX) / denom
 
-		// Solve: px + t*dirX = poly[i][0] + s*ex
-		//        py + t*dirY = poly[i][1] + s*ey
-		denom := dirX*ey - dirY*ex
-		if math.Abs(denom) < 1e-12 {
-			continue // parallel
-		}
-		dx := poly[i][0] - px
-		dy := poly[i][1] - py
-		t := (dx*ey - dy*ex) / denom
-		s := (dx*dirY - dy*dirX) / denom
-
-		if s >= -1e-10 && s <= 1.0+1e-10 {
-			params = append(params, t)
+			// Half-open edge test so a line through a shared vertex is counted once.
+			if s >= 0 && s < 1 {
+				params = append(params, t)
+			}
 		}
 	}
-
 	if len(params) < 2 {
 		return nil
 	}
-
 	sort.Float64s(params)
 
-	// Take pairs of intersections — odd-parity rule: inside between 1st-2nd, 3rd-4th, etc.
-	var result [][4]float64
+	var out [][2]float64
 	for i := 0; i+1 < len(params); i += 2 {
-		t1 := params[i]
-		t2 := params[i+1]
-		if t2-t1 < 1e-10 {
-			continue
+		if params[i+1]-params[i] > 1e-10 {
+			out = append(out, [2]float64{params[i], params[i+1]})
 		}
-		result = append(result, [4]float64{
-			px + t1*dirX, py + t1*dirY,
-			px + t2*dirX, py + t2*dirY,
-		})
 	}
-	return result
+	return out
 }
 
-// applyDashPattern subdivides a line segment according to a dash pattern.
-// Positive dash values = drawn, negative = gap, zero = dot.
-func applyDashPattern(seg [4]float64, dirX, dirY float64, dashes []float64) [][4]float64 {
-	totalLen := math.Sqrt((seg[2]-seg[0])*(seg[2]-seg[0]) + (seg[3]-seg[1])*(seg[3]-seg[1]))
-	if totalLen < 1e-10 {
-		return nil
+// dashInterval emits the drawn parts of [t0, t1] for a dash pattern phased
+// from t = 0. Positive values are dashes, negative gaps, zero a dot (drawn
+// with length dotLen, taking no space in the pattern). An empty pattern is a
+// continuous line.
+func dashInterval(t0, t1 float64, dashes []float64, dotLen float64, emit func(a, b float64)) {
+	period := 0.0
+	for _, d := range dashes {
+		period += math.Abs(d)
+	}
+	if len(dashes) == 0 || period < 1e-12 || (t1-t0)/period*float64(len(dashes)) > maxDashesPerInterval {
+		emit(t0, t1)
+		return
 	}
 
-	var result [][4]float64
-	pos := 0.0
-	dashIdx := 0
-
-	for pos < totalLen {
-		d := dashes[dashIdx%len(dashes)]
-		absD := math.Abs(d)
-		if absD < 1e-10 {
-			absD = 0.1 // dot
+	p := math.Floor(t0/period) * period
+	for p < t1 {
+		for _, d := range dashes {
+			if p >= t1 {
+				break
+			}
+			switch {
+			case d > 0:
+				if a, b := math.Max(p, t0), math.Min(p+d, t1); b > a {
+					emit(a, b)
+				}
+			case d == 0:
+				if p >= t0 {
+					emit(p, math.Min(p+dotLen, t1))
+				}
+			}
+			p += math.Abs(d)
 		}
-		end := pos + absD
-		if end > totalLen {
-			end = totalLen
-		}
-
-		if d >= 0 { // draw
-			x1 := seg[0] + pos/totalLen*(seg[2]-seg[0])
-			y1 := seg[1] + pos/totalLen*(seg[3]-seg[1])
-			x2 := seg[0] + end/totalLen*(seg[2]-seg[0])
-			y2 := seg[1] + end/totalLen*(seg[3]-seg[1])
-			result = append(result, [4]float64{x1, y1, x2, y2})
-		}
-		// else: gap, skip
-
-		pos = end
-		dashIdx++
 	}
-	return result
 }
