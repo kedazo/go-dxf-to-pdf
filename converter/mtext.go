@@ -15,6 +15,7 @@ type MTextStyle struct {
 	HeightRelative float64 // 0 = not set; multiplier of the (default or absolute) height (from \H0.66x;)
 	WidthFactor    float64 // 0 = use default (1.0)
 	ObliqueAngle   float64 // degrees
+	Tracking       float64 // \T: character advance factor (0 or 1 = normal)
 	ColorR         int
 	ColorG         int
 	ColorB         int
@@ -56,6 +57,7 @@ func ParseMText(s string) []MTextSegment {
 			Height:        run.Height,
 			WidthFactor:   run.WidthFactor,
 			ObliqueAngle:  run.ObliqueAngle,
+			Tracking:      run.Tracking,
 			Underline:     run.Underline,
 			Overstrike:    run.Overline,
 			Strikethrough: run.Strike,

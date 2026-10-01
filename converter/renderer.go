@@ -750,6 +750,7 @@ type mtextItem struct {
 	x     float64 // offset from the line start in page mm
 	width float64 // drawn width (with the look's horizontal scale)
 	ink   float64 // width without trailing spaces
+	space bool    // ends with a space: a line may break (and justify) after it
 	h     float64 // cap height in page mm
 	rise  float64 // baseline raise in page mm (super/subscripts)
 	col   color.RGBA
@@ -805,7 +806,7 @@ func splitMTextRun(text string, words bool) []string {
 func justifyGaps(items []mtextItem) int {
 	n := 0
 	for _, it := range items[:max(len(items)-1, 0)] {
-		if it.width > it.ink {
+		if it.space {
 			n++
 		}
 	}
@@ -911,21 +912,22 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		}
 		x0 += shift
 	}
-	place := func(it mtextItem, inkWidth float64) {
+	// place puts an item (with its ink width set) at the pen; wrapInk is the
+	// width that must still fit on the line (its whole word).
+	place := func(it mtextItem, wrapInk float64) {
 		begin(it.seg.Style.Paragraph)
 		last := len(lines) - 1
 		limit := wrapWidthMM - paras[last].RightIndent*defaultScaledH
-		if wrapWidthMM > 0 && canBreak && len(lines[last]) > 0 && x0+inkWidth > limit {
+		if wrapWidthMM > 0 && canBreak && len(lines[last]) > 0 && x0+wrapInk > limit {
 			tabbed = nil // wrapped: left as a left stop
 			newLine(false)
 			begin(it.seg.Style.Paragraph)
 			last++
 		}
 		it.x = x0
-		it.ink = inkWidth
 		x0 += it.width
 		lines[last] = append(lines[last], it)
-		canBreak = it.width > inkWidth // ends with a space
+		canBreak = it.space
 	}
 	tab := func(p dxf.MTextParagraph) {
 		alignTabbed()
@@ -1010,6 +1012,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			} else {
 				it.width = max(face.TextWidth(num), face.TextWidth(den)) * look.width
 			}
+			it.ink = it.width
 			place(it, it.width)
 			continue
 		}
@@ -1030,10 +1033,26 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				tab(seg.Style.Paragraph)
 				continue
 			}
+			ink := face.TextWidth(strings.TrimRight(piece, " ")) * look.width // trailing spaces may hang over
+			if t := seg.Style.Tracking; t > 0 && math.Abs(t-1) > 1e-9 {
+				// \T: each character on its own, its advance scaled.
+				wrapInk := ink * t
+				for _, ch := range piece {
+					textLine := canvas.NewTextLine(face, string(ch), canvas.Left)
+					adv := textLine.Bounds().W() * look.width
+					it := mtextItem{seg: seg, line: textLine, look: look, width: adv * t, ink: adv, h: scaledH, rise: dy, col: textColor}
+					if ch == ' ' {
+						it.ink, it.space = 0, true
+					}
+					place(it, wrapInk)
+					wrapInk = it.ink
+				}
+				continue
+			}
 			textLine := canvas.NewTextLine(face, piece, canvas.Left)
 			w := textLine.Bounds().W() * look.width
-			ink := face.TextWidth(strings.TrimRight(piece, " ")) * look.width // trailing spaces may hang over
-			place(mtextItem{seg: seg, line: textLine, look: look, width: w, h: scaledH, rise: dy, col: textColor}, ink)
+			place(mtextItem{seg: seg, line: textLine, look: look, width: w, ink: ink, space: strings.HasSuffix(piece, " "),
+				h: scaledH, rise: dy, col: textColor}, ink)
 		}
 	}
 	alignTabbed()
@@ -1111,7 +1130,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		spread := 0.0
 		for _, it := range items {
 			curX := lineX + it.x + spread
-			if it.width > it.ink {
+			if it.space {
 				spread += gap
 			}
 			if it.den != nil {
@@ -1141,7 +1160,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 				dp := &canvas.Path{}
 				dp.MoveTo(curX, curY+deco.dy)
 				w := it.width
-				if it.width > it.ink {
+				if it.space {
 					w += gap // through a justified word gap
 				}
 				dp.LineTo(curX+w, curY+deco.dy)

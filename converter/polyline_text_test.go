@@ -329,6 +329,15 @@ func TestMTextParagraphs(t *testing.T) {
 	if left.X1-space > 69 || math.Abs(just.X1-space-70) > 0.3 || math.Abs(just.H()-left.H()) > 1e-6 {
 		t.Errorf("justified lines end at x=%v (left aligned %v), want 70 and the same lines", just.X1-space, left.X1-space)
 	}
+	// \T2 doubles the character advances; tracked words still wrap whole.
+	// (The bounds end at the last letter's own advance.)
+	want := drawn(`ABCD`, 0).W() + drawn(`ABC`, 0).W()
+	if b := drawn(`\T2;ABCD`, 0); math.Abs(b.W()-want) > want*0.03 {
+		t.Errorf("\\T2: %v mm wide, want about %v", b.W(), want)
+	}
+	if b := drawn(`\T2;abcdefgh`, 1); b.H() > 12 {
+		t.Errorf("a tracked word split across lines: text is %v mm tall", b.H())
+	}
 	// Centred in a 100 mm box from x = 10: the text's middle is near 60.
 	if b := drawn(`\pqc;ab`, 100); math.Abs((b.X0+b.X1)/2-60) > 1 {
 		t.Errorf("centred: text spans %v..%v, want it centred at 60", b.X0, b.X1)
