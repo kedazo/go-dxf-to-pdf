@@ -165,7 +165,12 @@ func Convert(inputPath, outputPath string, opts Options) (*Result, error) {
 
 // ConvertReader converts a DXF from a reader to a PDF writer.
 func ConvertReader(r io.Reader, pdfPath string, opts Options) (*Result, error) {
-	drawing, err := dxf.ReadFromReader(r)
+	// The DXF parser reads byte by byte, so parse from memory.
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading DXF: %w", err)
+	}
+	drawing, err := parseDxfData(data)
 	if err != nil {
 		return nil, fmt.Errorf("reading DXF: %w", err)
 	}
@@ -173,24 +178,36 @@ func ConvertReader(r io.Reader, pdfPath string, opts Options) (*Result, error) {
 }
 
 // readDxfFile reads a DXF file, auto-detecting the text encoding.
-// DXF files from Central/Eastern European CAD software often use Windows-1250.
-// We detect this by checking for $DWGCODEPAGE or high bytes, and convert to UTF-8.
 func readDxfFile(path string) (dxf.Drawing, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return dxf.Drawing{}, err
 	}
+	return parseDxfData(data)
+}
 
+// parseDxfData parses DXF bytes. DXF files from Central/Eastern European CAD
+// software often use Windows-1250; we detect this by checking for
+// $DWGCODEPAGE or high bytes, and convert to UTF-8 first.
+func parseDxfData(data []byte) (dxf.Drawing, error) {
 	// Detect encoding from $DWGCODEPAGE header or presence of high bytes with c238 markers
 	enc := detectDxfEncoding(data)
 	if enc != nil {
+		var err error
 		data, err = enc.NewDecoder().Bytes(data)
 		if err != nil {
 			return dxf.Drawing{}, fmt.Errorf("decoding DXF text: %w", err)
 		}
 	}
 
-	return dxf.ReadFromReader(bytes.NewReader(data))
+	drawing, err := dxf.ReadFromReader(bytes.NewReader(data))
+	if err != nil {
+		return drawing, err
+	}
+	if parserLeaksHatchSeeds() {
+		trimLeakedHatchSeeds(&drawing, scanHatchSeedCounts(data))
+	}
+	return drawing, nil
 }
 
 // detectDxfEncoding checks the raw DXF bytes for encoding hints.
