@@ -329,6 +329,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 
 	// Layer selection; the page frame follows it.
 	sel := newLayerFilter(opts.Layers)
+	lineTypes := newLineTypes(drawing)
 
 	// Compute bounding box
 	bbox := selectionBBox(drawing.Entities, blockMap, sel)
@@ -361,6 +362,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		// Paper is exactly sized — render directly without landscape swap or auto-fit
 		r := NewRenderer(paper, false, margin, opts.FontDir)
 		r.SetBatching(isPDF)
+		r.SetLineTypes(lineTypes)
 		t := NewTransform(bbox, effectiveScale, paper, margin, ParseAlignment(opts.Align), false)
 		r.SetTransform(t)
 		RenderEntities(r, drawing.Entities, layerMap, blockMap, sel)
@@ -400,6 +402,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		t := NewTransform(bbox, fitScale, paper, margin, align, landscape)
 		r := NewRenderer(paper, landscape, margin, opts.FontDir)
 		r.SetBatching(isPDF)
+		r.SetLineTypes(lineTypes)
 		r.SetTransform(t)
 		RenderEntities(r, drawing.Entities, layerMap, blockMap, sel)
 
@@ -428,6 +431,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 
 	renderer := NewRenderer(paper, landscape, margin, opts.FontDir)
 	renderer.SetBatching(isPDF)
+	renderer.SetLineTypes(lineTypes)
 	totalPages := grid.Cols * grid.Rows
 	boxes := entityBoxes(drawing.Entities, blockMap, sel)
 

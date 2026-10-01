@@ -425,6 +425,7 @@ type drawCtx struct {
 	layer string  // effective layer for block entities on layer "0" ("" = top level)
 	color RGB     // ByBlock color
 	lw    float64 // ByBlock line weight (mm)
+	ltBlock string // ByBlock line type name
 
 	filter   *layerFilter // --layers selection (nil = all)
 	selected bool         // an enclosing INSERT is on a selected layer
@@ -464,6 +465,7 @@ func (ctx drawCtx) effectiveLayer(ent dxf.Entity) string {
 func (ctx drawCtx) child(ins dxf.Entity, local affine, layers map[string]dxf.Layer) drawCtx {
 	c := ctx.inner(ins, local)
 	c.color, c.lw = resolveStyle(ins, layers, ctx)
+	c.ltBlock = ctx.lineTypeName(ins, layers)
 	return c
 }
 
@@ -753,8 +755,19 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 	}
 
 	rgb, lw := resolveStyle(ent, layers, ctx)
-	r.SetStyle(rgb, lw)
 	m := ctx.m
+	if pattern := r.lineTypes.pattern(ctx.lineTypeName(ent, layers)); pattern != nil {
+		// Linetypes scale with the drawing, the entity and the block it is in.
+		ltScale := ent.LineTypeScale()
+		if ltScale <= 0 {
+			ltScale = 1
+		}
+		offset, dashes := dashPattern(pattern, r.lineTypes.scale*ltScale*m.linearScale()*r.transform.Scale)
+		r.SetDashedStyle(rgb, lw, offset, dashes)
+		r.BreakPath() // each entity starts its own pattern
+	} else {
+		r.SetStyle(rgb, lw)
+	}
 
 	switch e := ent.(type) {
 	case *dxf.Line:

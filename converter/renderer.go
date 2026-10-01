@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/tdewolff/canvas"
@@ -40,10 +41,24 @@ type Renderer struct {
 	fillSet      bool    // ctx fill is opaque (SetFillColor), not the stroke default
 	strokeCol    color.RGBA
 	strokeW      float64
+	dashes       []float64 // dash/gap lengths in page mm (nil = solid), applied in flush
+	dashOffset   float64
+	breakPath    bool // the next segment starts a new subpath (new dash pattern)
+
+	lineTypes *lineTypes // the drawing's LTYPE table (nil = all solid)
 }
 
 // maxPendingSegs bounds the size of one batched path.
 const maxPendingSegs = 20000
+
+// maxRasterChain bounds the connected segments (polyline edges, arc pieces)
+// collected for a continuous dash pattern when not batching.
+const maxRasterChain = 256
+
+// SetLineTypes sets the line types used to dash entities.
+func (r *Renderer) SetLineTypes(lt *lineTypes) {
+	r.lineTypes = lt
+}
 
 // DefaultFontDir returns the default font directory.
 func DefaultFontDir() string {
@@ -102,13 +117,21 @@ func (r *Renderer) SetBatching(on bool) {
 }
 
 func (r *Renderer) SetStyle(col RGB, lineWidthMM float64) {
+	r.SetDashedStyle(col, lineWidthMM, 0, nil)
+}
+
+// SetDashedStyle sets a stroke style with a dash pattern (page mm, starting
+// with a dash; nil = solid) entered at offset, see Path.Dash.
+func (r *Renderer) SetDashedStyle(col RGB, lineWidthMM, offset float64, dashes []float64) {
 	rgba := color.RGBA{col.R, col.G, col.B, 255}
 	r.color = rgba
-	if r.styleSet && !r.fillSet && rgba == r.strokeCol && lineWidthMM == r.strokeW {
+	if r.styleSet && !r.fillSet && rgba == r.strokeCol && lineWidthMM == r.strokeW &&
+		offset == r.dashOffset && slices.Equal(dashes, r.dashes) {
 		return // same style: keep batching
 	}
 	r.flush()
 	r.strokeCol, r.strokeW, r.styleSet, r.fillSet = rgba, lineWidthMM, true, false
+	r.dashOffset, r.dashes = offset, dashes
 	r.ctx.SetStrokeColor(rgba)
 	r.ctx.SetStrokeWidth(lineWidthMM)
 	r.ctx.SetFillColor(color.RGBA{0, 0, 0, 0}) // transparent fill by default
@@ -138,16 +161,29 @@ func (r *Renderer) drawLine(x1, y1, x2, y2 float64) {
 // segment already ended there (then the stroke simply continues, which also
 // gives polylines proper joins).
 func (r *Renderer) penTo(x, y float64) {
-	if !r.batch || r.pendingSegs >= maxPendingSegs {
+	continues := r.pending != nil && !r.pending.Empty() && !r.breakPath &&
+		math.Abs(x-r.penX) <= 1e-9 && math.Abs(y-r.penY) <= 1e-9
+	r.breakPath = false
+	switch {
+	case r.batch && r.pendingSegs >= maxPendingSegs:
 		r.flush()
+	case !r.batch && (!continues || r.dashes == nil || r.pendingSegs >= maxRasterChain):
+		// Without batching only dashed strokes chain up (for the pattern).
+		r.flush()
+	case continues:
+		return
 	}
 	if r.pending == nil {
 		r.pending = &canvas.Path{}
 	}
-	if r.pending.Empty() || math.Abs(x-r.penX) > 1e-9 || math.Abs(y-r.penY) > 1e-9 {
-		r.pending.MoveTo(x, y)
-		r.penX, r.penY = x, y
-	}
+	r.pending.MoveTo(x, y)
+	r.penX, r.penY = x, y
+}
+
+// BreakPath makes the next segment start a new subpath even if it continues
+// the last one, so it begins its own dash pattern.
+func (r *Renderer) BreakPath() {
+	r.breakPath = true
 }
 
 func (r *Renderer) lineTo(x, y float64) {
@@ -171,10 +207,27 @@ func (r *Renderer) flush() {
 	if p == nil || p.Empty() {
 		return
 	}
+	// Dashing the geometry (rather than via the stroke style) keeps the
+	// pattern phase intact when tiles clip the path.
+	if r.dashes != nil {
+		if p = p.Dash(r.dashOffset, r.dashes...); p.Empty() {
+			return
+		}
+	}
 	if r.clip != nil {
 		if p = clipPath(p, *r.clip); p.Empty() {
 			return
 		}
+	}
+	if !r.batch && r.dashes != nil {
+		// The rasterizer can panic stroking connected chains (see
+		// SetBatching): draw the dash pieces one segment at a time.
+		for s := p.Scanner(); s.Scan(); {
+			if s.Cmd() != canvas.MoveToCmd {
+				r.ctx.DrawPath(0, 0, s.Path())
+			}
+		}
+		return
 	}
 	r.ctx.DrawPath(0, 0, p)
 }
