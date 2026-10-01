@@ -65,6 +65,24 @@ func TestTransparentTilesClipped(t *testing.T) {
 	}
 }
 
+// With text cutting (transparent tiled PDF) text across the clip rectangle
+// is cut at it; text inside stays text.
+func TestTextCutAtClip(t *testing.T) {
+	if _, err := os.Stat(filepath.Join(DefaultFontDir(), "DejaVuSans.ttf")); err != nil {
+		t.Skip("DejaVu fonts not available")
+	}
+	paper := PaperSize{Width: 200, Height: 200}
+	r := NewRenderer(paper, false, 0, "")
+	r.SetTransform(NewTransform(BBox{MaxX: 200, MaxY: 200}, 1, paper, 0, AlignTopLeft, false))
+	r.SetTextCut(true)
+	r.SetClipRect(0, 0, 50, 200)
+	r.DrawText(40, 100, "A LONG LABEL", 5, 0, 0, vAlignBaseline, r.lookWithFont("", "", 1, 0))
+	r.ClipEnd()
+	if b := r.c.Bounds(); b.W() == 0 || b.X1 > 50.01 {
+		t.Errorf("cut text spans x %v..%v, want it to end at the clip edge 50", b.X0, b.X1)
+	}
+}
+
 func TestCullEntities(t *testing.T) {
 	in := dxf.NewLine()
 	in.P1, in.P2 = dxf.Point{X: 1, Y: 1}, dxf.Point{X: 2, Y: 2}

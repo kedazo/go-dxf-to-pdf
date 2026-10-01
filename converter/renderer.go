@@ -60,6 +60,7 @@ type Renderer struct {
 	pageRects    []*canvas.Rect // of the completed pages
 	overlays     []*canvas.Canvas
 	rasterTol    float64                   // > 0: strokes are outlined here, with this tolerance (SetRasterStrokes)
+	textCut      bool                      // text across the clip rect is cut as outlines (SetTextCut)
 	hatchCache   map[hatchKey][][4]float64 // pattern hatch lines, by hatch and scale
 	hatchCached  int                       // segments held in hatchCache
 	imageFiles   map[*dxf.Image]string
@@ -677,7 +678,7 @@ func (r *Renderer) textFace(look textLook, heightMM float64, col color.RGBA, sty
 // stretched horizontally by sx and slanted by obliqueDeg.
 func (r *Renderer) drawTextLine(x, y float64, line *canvas.Text, sx, obliqueDeg float64) {
 	if sx == 1 && obliqueDeg == 0 {
-		r.ctx.DrawText(x, y, line)
+		r.drawText(x, y, line)
 		return
 	}
 	// The page is Y-down: glyph tops lie at smaller y, and a positive
@@ -687,9 +688,57 @@ func (r *Renderer) drawTextLine(x, y float64, line *canvas.Text, sx, obliqueDeg 
 	// Shear after scaling (matrices apply right to left), so the width
 	// factor doesn't change the slant angle.
 	r.ctx.ComposeView(canvas.Identity.Translate(x, y).Shear(shear, 0).Scale(sx, 1).Translate(-x, -y))
-	r.ctx.DrawText(x, y, line)
+	r.drawText(x, y, line)
 	r.ctx.Pop()
 }
+
+// SetTextCut makes text that crosses the clip rectangle be drawn as glyph
+// outlines cut at it (transparent tiled PDF, which has no mask over the
+// margins).
+func (r *Renderer) SetTextCut(on bool) {
+	r.textCut = on
+}
+
+// drawText draws a text line through the context, cut at the clip
+// rectangle when SetTextCut is on.
+func (r *Renderer) drawText(x, y float64, line *canvas.Text) {
+	if !r.textCut || r.clip == nil {
+		r.ctx.DrawText(x, y, line)
+		return
+	}
+	// The matrix Context.DrawText uses, into canvas coordinates.
+	m := r.ctx.CoordSystemView().Mul(r.ctx.View()).Translate(x, y).ReflectY()
+	clip := canvas.Rectangle(r.clip.W(), r.clip.H()).Translate(r.clip.X0, r.clip.Y0).Transform(r.ctx.CoordSystemView())
+	c, b := clip.FastBounds(), line.Bounds().Transform(m)
+	switch {
+	case b.X0 >= c.X0 && b.X1 <= c.X1 && b.Y0 >= c.Y0 && b.Y1 <= c.Y1: // inside
+		r.ctx.DrawText(x, y, line)
+	case b.X0 < c.X1 && b.X1 > c.X0 && b.Y0 < c.Y1 && b.Y1 > c.Y0: // across the edge
+		line.RenderTo(textCutter{dst: r.c, clip: clip}, m, 0)
+	}
+}
+
+// textCutter renders text as paths cut to a clip path (canvas coordinates).
+type textCutter struct {
+	dst  canvas.Renderer
+	clip *canvas.Path
+}
+
+func (t textCutter) Size() (float64, float64) { return t.dst.Size() }
+
+func (t textCutter) RenderPath(p *canvas.Path, style canvas.Style, m canvas.Matrix) {
+	p = p.Copy().Transform(m)
+	if cut, ok := intersectFill(p, style.FillRule, t.clip); ok {
+		p = cut
+	}
+	if !p.Empty() {
+		t.dst.RenderPath(p, style, canvas.Identity)
+	}
+}
+
+func (t textCutter) RenderText(text *canvas.Text, m canvas.Matrix) { text.RenderTo(t, m, 0) }
+
+func (t textCutter) RenderImage(img image.Image, m canvas.Matrix) { t.dst.RenderImage(img, m) }
 
 // baselineShift returns how far (in page mm, Y-down) the baseline sits below
 // the anchor point for the given vertical alignment.

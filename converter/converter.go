@@ -516,6 +516,8 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options, images m
 	grid := ComputeTileGrid(drawW, drawH, printW, printH)
 
 	renderer := newRenderer(paper, landscape)
+	// No mask covers a transparent PDF's margins: text is cut at the tile.
+	renderer.SetTextCut(opts.Transparent && isPDF)
 	totalPages := grid.Cols * grid.Rows
 	boxes := entityBoxes(entities, blockMap, sel, layerMap)
 
