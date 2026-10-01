@@ -263,84 +263,20 @@ func findImages(d *dxf.Drawing, path string, images map[*dxf.Image]string) {
 	}
 }
 
-// findXrefFile locates a referenced file: as stored, relative to the host
-// drawing, or by name next to the host. Archives unpacked with the wrong
-// code page mangle non-ASCII letters in file names, so components that
-// don't exist are matched by their ASCII letters when that is unambiguous.
+// findXrefFile locates a file referenced by the drawing at hostPath ("" =
+// not found) with dxf.FindXrefFile: relative to the drawing, with names
+// garbled by a wrong-code-page archive matched too, and a DXF next to a
+// referenced DWG preferred. A path from another machine is also looked for
+// by its name next to the drawing.
 func findXrefFile(hostPath, ref string) string {
-	ref = strings.ReplaceAll(ref, `\`, "/")
-	if ref == "" {
-		return ""
+	dir := filepath.Dir(hostPath)
+	if path, err := dxf.FindXrefFile(dir, ref); err == nil {
+		return path
 	}
-	hostDir := filepath.Dir(hostPath)
-	var candidates []string
-	if filepath.IsAbs(ref) {
-		candidates = append(candidates, ref)
-	} else {
-		candidates = append(candidates, filepath.Join(hostDir, ref))
-	}
-	candidates = append(candidates, filepath.Join(hostDir, filepath.Base(ref)))
-	for _, c := range candidates {
-		if st, err := os.Stat(c); err == nil && !st.IsDir() {
-			return c
-		}
-	}
-	rel := ref
-	if filepath.IsAbs(ref) {
-		rel = filepath.Base(ref)
-	}
-	for _, r := range []string{rel, filepath.Base(rel)} {
-		if p := fuzzyPath(hostDir, strings.Split(filepath.ToSlash(r), "/")); p != "" {
-			return p
+	if base := filepath.Base(strings.ReplaceAll(ref, `\`, "/")); base != ref && base != "." {
+		if path, err := dxf.FindXrefFile(dir, base); err == nil {
+			return path
 		}
 	}
 	return ""
-}
-
-// fuzzyPath walks the path components below dir, taking an exact match or
-// else the single entry with the same ASCII skeleton.
-func fuzzyPath(dir string, parts []string) string {
-	for i, part := range parts {
-		if part == "" || part == "." {
-			continue
-		}
-		next := filepath.Join(dir, part)
-		if _, err := os.Stat(next); err != nil {
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				return ""
-			}
-			want, match := asciiSkeleton(part), ""
-			for _, e := range entries {
-				if asciiSkeleton(e.Name()) == want {
-					if match != "" {
-						return "" // ambiguous
-					}
-					match = e.Name()
-				}
-			}
-			if match == "" {
-				return ""
-			}
-			next = filepath.Join(dir, match)
-		}
-		if i == len(parts)-1 {
-			if st, err := os.Stat(next); err != nil || st.IsDir() {
-				return ""
-			}
-		}
-		dir = next
-	}
-	return dir
-}
-
-// asciiSkeleton is the lower-cased ASCII part of a file name.
-func asciiSkeleton(name string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(name) {
-		if r < 0x80 {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }

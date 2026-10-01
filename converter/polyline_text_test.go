@@ -193,7 +193,8 @@ func TestParseMTextStacksAndEscapes(t *testing.T) {
 		`\U+0151r\U+005C`: `őr\`, // a decoded backslash stays text
 		`a\\U+0041`:       `a\U+0041`,
 		`%%c25`:           "Ø25",
-		`a^Jb`:            "a|b",
+		"a\nb":            "a|b", // ^J, decoded by the reader
+		"a\r\nb":          "a|b",
 		`1\P2`:            "1|2",
 	} {
 		var got strings.Builder

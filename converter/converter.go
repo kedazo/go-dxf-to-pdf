@@ -262,7 +262,7 @@ func readDrawing(inputPath string, dwg2dxfBin string) (*dxf.Drawing, error) {
 		return nil, err
 	}
 	drawing, err := readDxfFile(tmpDxf)
-	os.Remove(tmpDxf)
+	os.RemoveAll(filepath.Dir(tmpDxf))
 	if err == nil {
 		return &drawing, nil
 	}
@@ -275,7 +275,7 @@ func readDrawing(inputPath string, dwg2dxfBin string) (*dxf.Drawing, error) {
 	if minErr != nil {
 		return nil, fmt.Errorf("reading DXF: %w (minimal-header retry failed: %v)", err, minErr)
 	}
-	defer os.Remove(tmpMin)
+	defer os.RemoveAll(filepath.Dir(tmpMin))
 	minDrawing, minErr := readDxfFile(tmpMin)
 	if minErr != nil {
 		return nil, fmt.Errorf("reading DXF: %w (minimal-header retry: %v)", err, minErr)
