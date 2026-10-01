@@ -35,9 +35,10 @@ type Renderer struct {
 	color      color.RGBA // current entity color (used for text)
 	clip       *canvas.Rect // page-space clip rectangle (tiled output), nil = none
 
-	// Stroke batching (PDF only, see SetBatching): consecutive strokes with
-	// the same style are collected into one path and drawn in a single call.
-	// Writing one PDF path per segment dominated the cost on large drawings.
+	// Stroke batching (see SetBatching, and SetRasterStrokes for raster
+	// output): consecutive strokes with the same style are collected into one
+	// path and drawn in a single call. Writing one PDF path per segment
+	// dominated the cost on large drawings.
 	batch        bool
 	pending      *canvas.Path // batched strokes, page coordinates
 	pendingSegs  int
@@ -58,6 +59,7 @@ type Renderer struct {
 	overlay      *canvas.Canvas
 	pageRects    []*canvas.Rect // of the completed pages
 	overlays     []*canvas.Canvas
+	rasterTol    float64                   // > 0: strokes are outlined here, with this tolerance (SetRasterStrokes)
 	hatchCache   map[hatchKey][][4]float64 // pattern hatch lines, by hatch and scale
 	hatchCached  int                       // segments held in hatchCache
 	imageFiles   map[*dxf.Image]string
@@ -220,13 +222,21 @@ func (r *Renderer) SetTransform(t Transform) {
 	r.transform = t
 }
 
-// SetBatching enables merging same-style strokes into large paths. Only use
-// it for PDF output: canvas' rasterizer strokes a path by settling its
-// outline, which is slow and can panic on large self-intersecting paths, so
-// raster output keeps one path per primitive.
+// SetBatching enables merging same-style strokes into large paths. For
+// raster output use it with SetRasterStrokes: canvas' rasterizer strokes a
+// path by settling its whole outline, which is slow and can panic on large
+// self-intersecting paths.
 func (r *Renderer) SetBatching(on bool) {
 	r.flush()
 	r.batch = on
+}
+
+// SetRasterStrokes makes the renderer outline strokes itself, for raster
+// output at dpi: each subpath of a batch is stroked on its own (falling back
+// to single segments where canvas fails) and the batch is filled as one.
+func (r *Renderer) SetRasterStrokes(dpi float64) {
+	r.flush()
+	r.rasterTol = canvas.PixelTolerance * 25.4 / dpi
 }
 
 func (r *Renderer) SetStyle(col RGB, lineWidthMM float64) {
@@ -341,6 +351,10 @@ func (r *Renderer) flush() {
 			return
 		}
 	}
+	if r.rasterTol > 0 && r.strokeW > 0 {
+		r.fillStrokeOutline(p)
+		return
+	}
 	if !r.batch && r.dashes != nil {
 		// The rasterizer can panic stroking connected chains (see
 		// SetBatching): draw the dash pieces one segment at a time.
@@ -352,6 +366,47 @@ func (r *Renderer) flush() {
 		return
 	}
 	r.ctx.DrawPath(0, 0, p)
+}
+
+// fillStrokeOutline draws strokes as one filled outline (raster output, see
+// SetRasterStrokes). Every subpath is stroked on its own, so the outlines
+// all wind the same way and fill as their union.
+func (r *Renderer) fillStrokeOutline(p *canvas.Path) {
+	outline := &canvas.Path{}
+	for _, sp := range p.Split() {
+		if o := strokeOutline(sp, r.strokeW, r.rasterTol); o != nil {
+			outline = outline.Append(o)
+			continue
+		}
+		// Chains can make canvas panic: stroke their segments one by one.
+		for s := sp.Scanner(); s.Scan(); {
+			if s.Cmd() != canvas.MoveToCmd {
+				if o := strokeOutline(s.Path(), r.strokeW, r.rasterTol); o != nil {
+					outline = outline.Append(o)
+				}
+			}
+		}
+	}
+	if outline.Empty() {
+		return
+	}
+	r.ctx.Push()
+	r.ctx.SetFillColor(r.strokeCol)
+	r.ctx.SetStrokeColor(color.RGBA{})
+	r.ctx.SetFillRule(canvas.NonZero)
+	r.ctx.DrawPath(0, 0, outline)
+	r.ctx.Pop()
+}
+
+// strokeOutline outlines a stroke of width w (butt caps, miter joins, like
+// the context's default style), or returns nil where canvas panics.
+func strokeOutline(p *canvas.Path, w, tolerance float64) (outline *canvas.Path) {
+	defer func() {
+		if recover() != nil {
+			outline = nil
+		}
+	}()
+	return p.Stroke(w, canvas.ButtCap, canvas.MiterJoin, tolerance)
 }
 
 // clipPath clips a (multi-subpath) stroke path to a rectangle. Path.Clip only

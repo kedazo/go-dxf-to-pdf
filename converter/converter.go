@@ -371,7 +371,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options, images m
 	leaderArrows := newLeaderArrows(drawing)
 	newRenderer := func(paper PaperSize, landscape bool) *Renderer {
 		r := NewRenderer(paper, landscape, margin, opts.FontDir)
-		r.SetBatching(isPDF)
+		r.SetBatching(true)
 		r.SetLineTypes(lineTypes)
 		r.SetTextStyles(drawing.Styles)
 		r.SetLeaderArrows(leaderArrows)
@@ -379,6 +379,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options, images m
 		r.SetFrames(drawing)
 		if !isPDF {
 			r.SetMinStrokeWidth(25.4 / rasterDPI(opts.DPI)) // one pixel
+			r.SetRasterStrokes(rasterDPI(opts.DPI))
 		}
 		return r
 	}

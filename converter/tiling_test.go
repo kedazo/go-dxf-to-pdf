@@ -105,6 +105,45 @@ func TestStrokeBatchingAcrossFlushes(t *testing.T) {
 	}
 }
 
+// Raster output strokes batches itself: crossing chains and dashes all
+// render, each at the stroke width.
+func TestRasterStrokeBatches(t *testing.T) {
+	paper := PaperSize{Width: 100, Height: 100}
+	r := NewRenderer(paper, false, 0, "")
+	r.SetTransform(NewTransform(BBox{MaxX: 100, MaxY: 100}, 1, paper, 0, AlignTopLeft, false))
+	r.SetBatching(true)
+	r.SetRasterStrokes(50)
+	r.SetStyle(RGB{}, 1)
+	for i := 0; i < 50; i++ { // a self-crossing zigzag chain
+		r.DrawLine(float64(i*2), float64(10+(i%2)*80), float64(i*2+2), float64(10+((i+1)%2)*80))
+	}
+	r.SetDashedStyle(RGB{}, 1, 0, []float64{5, 5})
+	r.DrawLine(0, 95, 100, 95) // page y = 5
+	path := t.TempDir() + "/out.png"
+	if err := r.Save(path, "png", 50, false); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dark := func(xmm, ymm float64) bool {
+		c, _, _, _ := img.At(int(xmm*50/25.4), int(ymm*50/25.4)).RGBA()
+		return c < 0x8000
+	}
+	if !dark(51, 50) || !dark(1, 50) || dark(50, 50) { // the segments cross mid-height at odd x
+		t.Error("zigzag chain not drawn")
+	}
+	if !dark(2.5, 5) || dark(7.5, 5) || !dark(12.5, 5) {
+		t.Error("dashes not drawn as dash, gap, dash")
+	}
+}
+
 // Separate strokes in one batch must stay separate after clipping (canvas'
 // Path.Clip would join them with a stray line).
 func TestClipPathKeepsSubpathsSeparate(t *testing.T) {
