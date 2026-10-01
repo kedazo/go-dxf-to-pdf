@@ -89,6 +89,58 @@ func polyfaceEdges(p *dxf.Polyline) []polylineEdge {
 	return edges
 }
 
+// meshEdges returns the edges of a MESH: its explicit edges, or else the
+// edges of its faces (each shared edge once).
+func meshEdges(m *dxf.Mesh) []polylineEdge {
+	vertex := func(i int) (dxf.Point, bool) {
+		if i < 0 || i >= len(m.Vertices) {
+			return dxf.Point{}, false
+		}
+		return m.Vertices[i], true
+	}
+	var edges []polylineEdge
+	add := func(a, b int) {
+		pa, okA := vertex(a)
+		pb, okB := vertex(b)
+		if okA && okB && a != b {
+			edges = append(edges, polylineEdge{X1: pa.X, Y1: pa.Y, X2: pb.X, Y2: pb.Y})
+		}
+	}
+	if len(m.Edges) > 0 {
+		for _, e := range m.Edges {
+			add(e[0], e[1])
+		}
+		return edges
+	}
+	type edgeKey struct{ a, b int }
+	seen := make(map[edgeKey]bool)
+	for _, f := range m.Faces {
+		for i := range f {
+			a, b := f[i], f[(i+1)%len(f)]
+			if k := (edgeKey{min(a, b), max(a, b)}); !seen[k] {
+				seen[k] = true
+				add(a, b)
+			}
+		}
+	}
+	return edges
+}
+
+// attdefText returns what an ATTDEF shows: inside a block only a constant
+// one shows its value (the others become ATTRIBs on the INSERT); one lying
+// loose in a drawing shows its tag, as CAD programs do.
+func attdefText(e *dxf.AttributeDefinition, inBlock bool) (text string, ok bool) {
+	switch {
+	case e.IsInvisible():
+		return "", false
+	case inBlock && e.IsConstant():
+		return e.PlainText(), true
+	case inBlock:
+		return "", false
+	}
+	return e.TextTag, e.TextTag != ""
+}
+
 func polygonMeshEdges(p *dxf.Polyline) []polylineEdge {
 	grid := p.PolygonMeshGrid()
 	if grid == nil {

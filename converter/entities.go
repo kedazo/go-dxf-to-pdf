@@ -389,6 +389,24 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		for _, p := range []dxf.Point{e.FirstCorner, e.SecondCorner, e.ThirdCorner, e.FourthCorner} {
 			expand(om, p.X, p.Y)
 		}
+	case *dxf.Trace:
+		om := m.mul(ocsAffine(e.ExtrusionDirection, e.FirstCorner.Z))
+		for _, p := range []dxf.Point{e.FirstCorner, e.SecondCorner, e.ThirdCorner, e.FourthCorner} {
+			expand(om, p.X, p.Y)
+		}
+	case *dxf.Mesh:
+		for _, v := range e.Vertices {
+			expand(m, v.X, v.Y)
+		}
+	case *dxf.AttributeDefinition:
+		if text, ok := attdefText(e, ctx.depth > 0); ok {
+			if e.IsMultiline() && ctx.depth > 0 && e.MText.Text != "" {
+				expandMText(bb, m, &e.MText)
+			} else {
+				expandTextLine(bb, m.mul(ocsAffine(e.Normal, e.Location.Z)), text, e.TextHeight, e.RelativeXScaleFactor,
+					resolveTextAnchor(e.Location, e.SecondAlignmentPoint, e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation))
+			}
+		}
 	case *dxf.Insert:
 		if blk, ok := blocks[e.Name]; ok {
 			for _, local := range insertInstances(e, blk.BasePoint) {
@@ -581,6 +599,35 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		r.SetStyle(rgb, 0)
 		r.SetFillColor(rgb)
 		r.DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4)
+
+	case *dxf.Trace: // a filled quadrilateral, like SOLID
+		om := m.mul(ocsAffine(e.ExtrusionDirection, e.FirstCorner.Z))
+		x1, y1 := om.apply(e.FirstCorner.X, e.FirstCorner.Y)
+		x2, y2 := om.apply(e.SecondCorner.X, e.SecondCorner.Y)
+		x3, y3 := om.apply(e.ThirdCorner.X, e.ThirdCorner.Y)
+		x4, y4 := om.apply(e.FourthCorner.X, e.FourthCorner.Y)
+		r.SetStyle(rgb, 0)
+		r.SetFillColor(rgb)
+		r.DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4)
+
+	case *dxf.Mesh: // its edges, seen from above
+		for _, edge := range meshEdges(e) {
+			drawEdge(r, m, edge.X1, edge.Y1, edge.X2, edge.Y2, 0)
+		}
+
+	case *dxf.AttributeDefinition:
+		text, ok := attdefText(e, ctx.depth > 0)
+		if !ok {
+			return
+		}
+		if e.IsMultiline() && ctx.depth > 0 && e.MText.Text != "" {
+			renderMText(r, &e.MText, m)
+			return
+		}
+		renderTextLine(r, m.mul(ocsAffine(e.Normal, e.Location.Z)), text, e.TextHeight,
+			resolveTextAnchor(e.Location, e.SecondAlignmentPoint,
+				e.HorizontalTextJustification, e.VerticalTextJustification, e.Rotation),
+			r.lookFor(e.TextStyleName, e.RelativeXScaleFactor, e.ObliqueAngle))
 
 	case *dxf.Hatch:
 		if !enableHatch {

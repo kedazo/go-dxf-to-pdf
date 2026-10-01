@@ -85,6 +85,46 @@ func TestPolylineClosedAndSplineFit(t *testing.T) {
 	}
 }
 
+func TestMeshEdges(t *testing.T) {
+	m := dxf.NewMesh()
+	m.Vertices = []dxf.Point{{X: 0}, {X: 1}, {X: 1, Y: 1}, {Y: 1}}
+	m.Faces = [][]int{{0, 1, 2}, {0, 2, 3}} // two triangles sharing 0-2
+	if got := len(meshEdges(m)); got != 5 {
+		t.Errorf("face edges = %d, want 5", got)
+	}
+	m.Edges = [][2]int{{0, 1}, {1, 2}, {2, 9}} // explicit; a bad index is skipped
+	if got := len(meshEdges(m)); got != 2 {
+		t.Errorf("explicit edges = %d, want 2", got)
+	}
+}
+
+// TRACE fills like SOLID; ATTDEFs show their tag when loose, their value
+// only when constant inside a block.
+func TestTraceAndAttdef(t *testing.T) {
+	tr := dxf.NewTrace()
+	tr.SecondCorner, tr.ThirdCorner, tr.FourthCorner = dxf.Point{X: 4}, dxf.Point{Y: 2}, dxf.Point{X: 4, Y: 2}
+	if bb := ComputeBoundingBox([]dxf.Entity{tr}, nil); bb != (BBox{MaxX: 4, MaxY: 2}) {
+		t.Errorf("trace bbox = %+v", bb)
+	}
+
+	ad := dxf.NewAttributeDefinition()
+	ad.TextTag, ad.Value = "ROOM", "101"
+	if text, ok := attdefText(ad, false); !ok || text != "ROOM" {
+		t.Errorf("loose ATTDEF = %q %v, want its tag", text, ok)
+	}
+	if _, ok := attdefText(ad, true); ok {
+		t.Error("variable ATTDEF in a block must not draw (its ATTRIB does)")
+	}
+	ad.SetIsConstant(true)
+	if text, ok := attdefText(ad, true); !ok || text != "101" {
+		t.Errorf("constant ATTDEF in a block = %q %v, want its value", text, ok)
+	}
+	ad.SetIsInvisible(true)
+	if _, ok := attdefText(ad, true); ok {
+		t.Error("invisible ATTDEF must not draw")
+	}
+}
+
 func TestPolygonMeshEdges(t *testing.T) {
 	p := dxf.NewPolyline()
 	p.Flags = 16
