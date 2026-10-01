@@ -3,8 +3,10 @@ package converter
 import (
 	"fmt"
 	"image"
+	"image/draw"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"os"
 
 	dxf "github.com/kedazo/dxf-go"
@@ -101,11 +103,85 @@ func drawImagePixels(r *Renderer, e *dxf.Image, m affine) {
 		}
 	}
 
+	// Clip outlines in file pixel coordinates: the image's own boundary, and
+	// the viewport outline mapped back from the page.
+	var clips [][][2]float64
+	if e.UseClipping() {
+		if poly := imageClipPixels(e.ClippingVertices(), sx, sy); poly != nil {
+			clips = append(clips, poly)
+		}
+	}
+	toPage := affine{a: xi - x0, b: yi - y0, c: xk - x0, d: yk - y0, e: x0, f: y0}
+	if r.clipPoly != nil {
+		inv := toPage.inverse()
+		poly := make([][2]float64, len(r.clipPoly))
+		for i, p := range r.clipPoly {
+			poly[i][0], poly[i][1] = inv.apply(p[0], p[1])
+		}
+		clips = append(clips, poly)
+	}
+	if len(clips) > 0 {
+		img = maskImage(img, clips)
+	}
+
 	r.flush()
 	r.ctx.Push()
-	r.ctx.ComposeView(canvas.Matrix{{xi - x0, xk - x0, x0}, {yi - y0, yk - y0, y0}})
+	r.ctx.ComposeView(canvas.Matrix{{toPage.a, toPage.c, toPage.e}, {toPage.b, toPage.d, toPage.f}})
 	r.ctx.DrawImage(0, 0, img, canvas.DPMM(1))
 	r.ctx.Pop()
+}
+
+// imageClipPixels maps an IMAGE's clip boundary (pixel centres of the size
+// the image was placed with, two points = a rectangle) to file pixel
+// coordinates; nil if it has too few points.
+func imageClipPixels(vertices []dxf.Point, sx, sy float64) [][2]float64 {
+	var pts [][2]float64
+	switch {
+	case len(vertices) == 2:
+		a, b := vertices[0], vertices[1]
+		pts = [][2]float64{{a.X, a.Y}, {b.X, a.Y}, {b.X, b.Y}, {a.X, b.Y}}
+	case len(vertices) > 2:
+		for _, v := range vertices {
+			pts = append(pts, [2]float64{v.X, v.Y})
+		}
+	default:
+		return nil
+	}
+	for i := range pts {
+		pts[i][0], pts[i][1] = (pts[i][0]+0.5)/sx, (pts[i][1]+0.5)/sy
+	}
+	return pts
+}
+
+// maskImage returns a copy of img that is transparent outside any of the
+// polygons (in pixel coordinates, even-odd), scanning row by row.
+func maskImage(img image.Image, polygons [][][2]float64) image.Image {
+	b := img.Bounds()
+	out := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(out, out.Bounds(), img, b.Min, draw.Src)
+	for k := 0; k < b.Dy(); k++ {
+		inside := make([]bool, b.Dx()) // in every polygon
+		for i := range inside {
+			inside[i] = true
+		}
+		for _, poly := range polygons {
+			in := make([]bool, b.Dx())
+			for _, iv := range lineIntervals(0, float64(k)+0.5, 1, 0, [][][2]float64{poly}) {
+				for i := max(int(math.Ceil(iv[0]-0.5)), 0); i < b.Dx() && float64(i)+0.5 <= iv[1]; i++ {
+					in[i] = true
+				}
+			}
+			for i := range inside {
+				inside[i] = inside[i] && in[i]
+			}
+		}
+		for i, ok := range inside {
+			if !ok {
+				out.Pix[k*out.Stride+i*4+3] = 0
+			}
+		}
+	}
+	return out
 }
 
 func abs(v float64) float64 {

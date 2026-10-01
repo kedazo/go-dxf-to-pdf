@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"image"
 	"testing"
 
 	dxf "github.com/kedazo/dxf-go"
@@ -151,6 +152,35 @@ func TestMLeaderStyle(t *testing.T) {
 	_, text, _ := mleaderParts(ml, nil, &look)
 	if text.TextStyleName != "NOTES" || !near(text.InitialTextHeight, 0.5) || text.AttachmentPoint != dxf.AttachmentPointTopCenter {
 		t.Errorf("text = style %q height %v attach %v", text.TextStyleName, text.InitialTextHeight, text.AttachmentPoint)
+	}
+}
+
+// Pixels outside a clip polygon become transparent.
+func TestMaskImage(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	for i := range src.Pix {
+		src.Pix[i] = 255
+	}
+	left := [][2]float64{{0, 0}, {2, 0}, {2, 4}, {0, 4}} // columns 0 and 1
+	out := maskImage(src, [][][2]float64{left}).(*image.NRGBA)
+	for k := 0; k < 4; k++ {
+		for i := 0; i < 4; i++ {
+			a := out.NRGBAAt(i, k).A
+			if want := uint8(255); i >= 2 {
+				want = 0
+				if a != want {
+					t.Errorf("pixel (%d,%d) alpha %d, want %d", i, k, a, want)
+				}
+			} else if a != want {
+				t.Errorf("pixel (%d,%d) alpha %d, want %d", i, k, a, want)
+			}
+		}
+	}
+
+	// A two-point clip boundary is a rectangle of pixel centres.
+	rect := imageClipPixels([]dxf.Point{{X: -0.5, Y: -0.5}, {X: 1.5, Y: 3.5}}, 1, 1)
+	if len(rect) != 4 || rect[2] != [2]float64{2, 4} {
+		t.Errorf("clip rectangle = %v", rect)
 	}
 }
 
