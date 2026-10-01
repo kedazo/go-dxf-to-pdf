@@ -548,11 +548,15 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options, images m
 			renderer.SetClipRect(margin, margin, printW, printH)
 			RenderEntities(renderer, cullEntities(entities, boxes, cullBox), layerMap, blockMap, sel)
 			renderer.ClipEnd()
-			if !opts.Transparent {
+			if opts.Transparent {
+				// Spill outside the tile is cleared when rasterizing; the crop
+				// marks go on top of that.
+				renderer.SetContentRect(margin, margin, printW, printH)
+				renderer.DrawOverlay(func() { DrawCropMarks(renderer, margin, pw, ph) })
+			} else {
 				renderer.MaskOutside(margin, margin, printW, printH)
+				DrawCropMarks(renderer, margin, pw, ph)
 			}
-
-			DrawCropMarks(renderer, margin, pw, ph)
 		}
 	}
 

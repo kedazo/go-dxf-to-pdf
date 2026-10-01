@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
+	"image/png"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers"
 	"github.com/tdewolff/canvas/renderers/pdf"
+	"github.com/tdewolff/canvas/renderers/rasterizer"
 )
 
 type Renderer struct {
@@ -51,6 +54,10 @@ type Renderer struct {
 	leaderArrows *leaderArrows // leader arrowheads by dimension style (nil = none)
 	minStrokeMM  float64       // thinner strokes are widened to this (raster: one pixel)
 	clipPoly     [][2]float64  // page-space clip polygon (viewport), nil = none
+	contentRect  *canvas.Rect  // current page: transparent raster output keeps only this (nil = all)
+	overlay      *canvas.Canvas
+	pageRects    []*canvas.Rect // of the completed pages
+	overlays     []*canvas.Canvas
 	imageFiles   map[*dxf.Image]string
 	images       map[string]image.Image // decoded image files
 	wipeoutFrame bool                   // WIPEOUTFRAME 1: wipeout outlines plot
@@ -100,8 +107,18 @@ func (r *Renderer) clipFill(p *canvas.Path) *canvas.Path {
 }
 
 // clipFillRule cuts a fill path, filled with the given rule, to the clip
-// polygon.
+// polygon and the clip rectangle (only fills crossing its edge are cut).
 func (r *Renderer) clipFillRule(p *canvas.Path, rule canvas.FillRule) *canvas.Path {
+	if r.clip != nil {
+		b := p.FastBounds()
+		switch {
+		case b.X1 < r.clip.X0 || b.X0 > r.clip.X1 || b.Y1 < r.clip.Y0 || b.Y0 > r.clip.Y1:
+			return &canvas.Path{}
+		case b.X0 < r.clip.X0 || b.X1 > r.clip.X1 || b.Y0 < r.clip.Y0 || b.Y1 > r.clip.Y1:
+			p = p.Settle(rule).And(canvas.Rectangle(r.clip.W(), r.clip.H()).Translate(r.clip.X0, r.clip.Y0))
+			rule = canvas.NonZero // settled
+		}
+	}
 	if r.clipPoly == nil {
 		return p
 	}
@@ -1017,11 +1034,38 @@ func (r *Renderer) DrawDebugBBox(bbox BBox) {
 func (r *Renderer) AddPage() {
 	r.flush()
 	r.pages = append(r.pages, r.c)
+	r.pageRects = append(r.pageRects, r.contentRect)
+	r.overlays = append(r.overlays, r.overlay)
+	r.contentRect, r.overlay = nil, nil
 	c := canvas.New(r.pageW, r.pageH)
 	r.c = c
 	r.ctx = canvas.NewContext(c)
 	r.ctx.SetCoordSystem(canvas.CartesianIV)
 	r.styleSet = false // fresh context, default style
+}
+
+// SetContentRect limits the current page of transparent raster output to a
+// page-space rectangle: anything drawn outside it (text or fills spilling
+// over a tile's edge) is cleared when the page is rasterized.
+func (r *Renderer) SetContentRect(x, y, w, h float64) {
+	r.contentRect = &canvas.Rect{X0: x, Y0: y, X1: x + w, Y1: y + h}
+}
+
+// DrawOverlay runs draw on the current page's overlay, which is put on top
+// of the page after the content rectangle is applied (e.g. crop marks).
+func (r *Renderer) DrawOverlay(draw func()) {
+	r.flush()
+	if r.overlay == nil {
+		r.overlay = canvas.New(r.pageW, r.pageH)
+	}
+	c, ctx := r.c, r.ctx
+	r.c, r.ctx = r.overlay, canvas.NewContext(r.overlay)
+	r.ctx.SetCoordSystem(canvas.CartesianIV)
+	r.styleSet = false
+	draw()
+	r.flush()
+	r.c, r.ctx = c, ctx
+	r.styleSet = false
 }
 
 // SetClipRect restricts subsequent drawing to a page-space rectangle.
@@ -1074,20 +1118,22 @@ func (r *Renderer) Save(path string, format string, dpi float64, transparent boo
 	allPages := make([]*canvas.Canvas, 0, len(r.pages)+1)
 	allPages = append(allPages, r.pages...)
 	allPages = append(allPages, r.c)
+	rects := append(append([]*canvas.Rect(nil), r.pageRects...), r.contentRect)
+	overlays := append(append([]*canvas.Canvas(nil), r.overlays...), r.overlay)
 
 	switch format {
 	case "pdf":
-		return r.savePDF(path, allPages)
+		return r.savePDF(path, allPages, overlays)
 	case "png":
-		return r.saveRaster(path, allPages, dpi, transparent, "png")
+		return r.saveRaster(path, allPages, rects, overlays, dpi, transparent, "png")
 	case "jpg", "jpeg":
-		return r.saveRaster(path, allPages, dpi, false, "jpg")
+		return r.saveRaster(path, allPages, rects, overlays, dpi, false, "jpg")
 	default:
 		return fmt.Errorf("unsupported format: %s", format)
 	}
 }
 
-func (r *Renderer) savePDF(path string, pages []*canvas.Canvas) error {
+func (r *Renderer) savePDF(path string, pages, overlays []*canvas.Canvas) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -1096,13 +1142,15 @@ func (r *Renderer) savePDF(path string, pages []*canvas.Canvas) error {
 
 	opts := pdf.DefaultOptions
 	p := pdf.New(f, pages[0].W, pages[0].H, &opts)
-	pages[0].RenderTo(p)
-
-	for i := 1; i < len(pages); i++ {
-		p.NewPage(pages[i].W, pages[i].H)
-		pages[i].RenderTo(p)
+	for i, page := range pages {
+		if i > 0 {
+			p.NewPage(page.W, page.H)
+		}
+		page.RenderTo(p)
+		if overlays[i] != nil {
+			overlays[i].RenderTo(p)
+		}
 	}
-
 	return p.Close()
 }
 
@@ -1114,7 +1162,8 @@ func rasterDPI(dpi float64) float64 {
 	return dpi
 }
 
-func (r *Renderer) saveRaster(path string, pages []*canvas.Canvas, dpi float64, transparent bool, format string) error {
+func (r *Renderer) saveRaster(path string, pages []*canvas.Canvas, rects []*canvas.Rect, overlays []*canvas.Canvas,
+	dpi float64, transparent bool, format string) error {
 	res := canvas.DPI(rasterDPI(dpi))
 
 	for i, c := range pages {
@@ -1123,6 +1172,16 @@ func (r *Renderer) saveRaster(path string, pages []*canvas.Canvas, dpi float64, 
 			ext := filepath.Ext(path)
 			base := strings.TrimSuffix(path, ext)
 			pagePath = fmt.Sprintf("%s_%d%s", base, i+1, ext)
+		}
+
+		if transparent && format == "png" && (rects[i] != nil || overlays[i] != nil) {
+			if err := writeMaskedPNG(pagePath, c, rects[i], overlays[i], res); err != nil {
+				return err
+			}
+			continue
+		}
+		if overlays[i] != nil {
+			c = withOverlay(c, overlays[i])
 		}
 
 		if !transparent {
@@ -1149,6 +1208,45 @@ func (r *Renderer) saveRaster(path string, pages []*canvas.Canvas, dpi float64, 
 		}
 	}
 	return nil
+}
+
+// withOverlay returns a canvas with the overlay drawn over the page.
+func withOverlay(page, overlay *canvas.Canvas) *canvas.Canvas {
+	c := canvas.New(page.W, page.H)
+	page.RenderTo(c)
+	overlay.RenderTo(c)
+	return c
+}
+
+// writeMaskedPNG rasterizes a page, clears everything outside rect (nil =
+// keep all), puts the overlay on top and writes a transparent PNG.
+func writeMaskedPNG(path string, page *canvas.Canvas, rect *canvas.Rect, overlay *canvas.Canvas, res canvas.Resolution) error {
+	img := rasterizer.Draw(page, res, canvas.DefaultColorSpace)
+	if rect != nil {
+		dpmm := res.DPMM()
+		b := img.Bounds()
+		x0, x1 := int(math.Round(rect.X0*dpmm)), int(math.Round(rect.X1*dpmm))
+		y0, y1 := int(math.Round(rect.Y0*dpmm)), int(math.Round(rect.Y1*dpmm))
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				if x < x0 || x >= x1 || y < y0 || y >= y1 {
+					img.SetRGBA(x, y, color.RGBA{})
+				}
+			}
+		}
+	}
+	if overlay != nil {
+		draw.Draw(img, img.Bounds(), rasterizer.Draw(overlay, res, canvas.DefaultColorSpace), image.Point{}, draw.Over)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func formatFromExtension(path string) string {

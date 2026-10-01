@@ -1,11 +1,69 @@
 package converter
 
 import (
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
 
 	dxf "github.com/kedazo/dxf-go"
 	"github.com/tdewolff/canvas"
 )
+
+// Transparent tiled PNGs keep the margins clear of spilling text and fills;
+// only the crop marks are drawn there.
+func TestTransparentTilesClipped(t *testing.T) {
+	if _, err := os.Stat(filepath.Join(DefaultFontDir(), "DejaVuSans.ttf")); err != nil {
+		t.Skip("DejaVu fonts not available")
+	}
+	drawing := dxf.NewDrawing()
+	line := dxf.NewLine()
+	line.P2 = dxf.Point{X: 600, Y: 300}
+	text := dxf.NewText()
+	text.Value = "A LONG LABEL ACROSS THE TILE EDGE"
+	text.Height = 20
+	text.Location = dxf.Point{X: 120, Y: 150} // crosses the first tile's right edge
+	drawing.Entities = append(drawing.Entities, line, text)
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.dxf")
+	if err := drawing.SaveFile(in); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.png")
+	if _, err := Convert(in, out, Options{Scale: "1:1", Paper: "A4", Margin: 10, Tile: true, Transparent: true, DPI: 50}); err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	f, err := os.Open(filepath.Join(dir, "out_1.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := img.Bounds()
+	dpmm := 50 / 25.4
+	margin := int(10 * dpmm)
+	opaque := func(x0, y0, x1, y1 int) int {
+		n := 0
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				if _, _, _, a := img.At(x, y).RGBA(); a > 0 {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	// The right margin, away from the crop marks at the corners.
+	if n := opaque(b.Max.X-margin+1, margin+int(6*dpmm), b.Max.X, b.Max.Y-margin-int(6*dpmm)); n > 0 {
+		t.Errorf("%d opaque pixels in the right margin", n)
+	}
+	if n := opaque(0, 0, margin, margin); n == 0 {
+		t.Error("crop mark missing in the top-left corner")
+	}
+}
 
 func TestCullEntities(t *testing.T) {
 	in := dxf.NewLine()
