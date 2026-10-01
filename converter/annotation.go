@@ -18,9 +18,43 @@ type leaderArrow struct {
 // leaderArrows resolves arrowheads per dimension style; a style's leader
 // arrow block (DIMLDRBLK) is a handle to a block record.
 type leaderArrows struct {
-	styles map[string]leaderArrow // upper-cased dimension style name
-	header leaderArrow            // $DIMASZ × $DIMSCALE
-	blocks map[dxf.Handle]string  // block record handle → block name (MULTILEADER content)
+	styles   map[string]leaderArrow     // upper-cased dimension style name
+	header   leaderArrow                // $DIMASZ × $DIMSCALE
+	blocks   map[dxf.Handle]string      // block record handle → block name (MULTILEADER content)
+	mleaders map[dxf.Handle]mleaderLook // MLEADERSTYLE handle → its defaults
+}
+
+// mleaderLook is what a MULTILEADER takes from its MLEADERSTYLE.
+type mleaderLook struct {
+	arrowBlock string  // "" = closed filled triangle
+	arrowSize  float64 // unscaled
+	textStyle  string
+	textHeight float64 // unscaled
+	align      int     // text alignment: 0 left, 1 center, 2 right
+	textColor  dxf.ObjectColor
+	lineColor  dxf.ObjectColor
+	lineWeight dxf.LineWeight
+}
+
+// mleaderLook returns the defaults of the MLEADERSTYLE with the handle.
+func (la *leaderArrows) mleaderLook(h dxf.Handle) (mleaderLook, bool) {
+	if la == nil || h == 0 {
+		return mleaderLook{}, false
+	}
+	look, ok := la.mleaders[h]
+	return look, ok
+}
+
+// objectColorRGB resolves a style colour; ByLayer and ByBlock (and unset)
+// keep the entity's own colour.
+func objectColorRGB(c dxf.ObjectColor, entity RGB) RGB {
+	if rgb, ok := c.TrueColor(); ok {
+		return trueColorRGB(rgb)
+	}
+	if aci, ok := c.ACI(); ok && aci > 0 && aci < 256 {
+		return ACIToRGB(int16(aci))
+	}
+	return entity
 }
 
 // blockNames returns the block names by block record handle.
@@ -59,6 +93,24 @@ func newLeaderArrows(d *dxf.Drawing) *leaderArrows {
 			a.block = block
 		}
 		la.styles[strings.ToUpper(s.Name)] = a
+	}
+
+	styleNames := make(map[dxf.Handle]string, len(d.Styles))
+	for i := range d.Styles {
+		styleNames[d.Styles[i].Handle()] = d.Styles[i].Name
+	}
+	la.mleaders = make(map[dxf.Handle]mleaderLook, len(d.MLeaderStyles))
+	for _, s := range d.MLeaderStyles {
+		la.mleaders[s.Handle] = mleaderLook{
+			arrowBlock: recordNames[s.ArrowheadHandle],
+			arrowSize:  s.ArrowheadSize,
+			textStyle:  styleNames[s.TextStyleHandle],
+			textHeight: s.TextHeight,
+			align:      int(s.TextAlignment),
+			textColor:  s.TextColor,
+			lineColor:  s.LeaderLineColor,
+			lineWeight: s.LeaderLineWeight,
+		}
 	}
 	return la
 }
@@ -145,7 +197,7 @@ func copyEntityStyle(from, to dxf.Entity) {
 // leader paths (each line through the landing and along the dogleg), the
 // text as an MTEXT (nil = none) and the content block's INSERT (nil = none,
 // or the block is unknown).
-func mleaderParts(e *dxf.MLeader, blockNames map[dxf.Handle]string) (paths [][]dxf.Point, text *dxf.MText, block *dxf.Insert) {
+func mleaderParts(e *dxf.MLeader, blockNames map[dxf.Handle]string, look *mleaderLook) (paths [][]dxf.Point, text *dxf.MText, block *dxf.Insert) {
 	for _, l := range e.Leaders {
 		dogleg := dxf.Point{
 			X: l.LastLeaderPoint.X + l.DoglegVector.X*l.DoglegLength,
@@ -173,6 +225,13 @@ func mleaderParts(e *dxf.MLeader, blockNames map[dxf.Handle]string) (paths [][]d
 			text.HasXAxisDirection = true
 		}
 		copyEntityStyle(e, text)
+		if look != nil { // the style's text style, height and alignment
+			text.TextStyleName = look.textStyle
+			if text.InitialTextHeight <= 0 {
+				text.InitialTextHeight = look.textHeight * mleaderScale(e)
+			}
+			text.AttachmentPoint = dxf.AttachmentPoint(1 + min(max(look.align, 0), 2)) // top row
+		}
 	}
 	if name := blockNames[e.BlockRecordHandle]; e.HasBlock && name != "" {
 		block = dxf.NewInsert()
@@ -186,13 +245,37 @@ func mleaderParts(e *dxf.MLeader, blockNames map[dxf.Handle]string) (paths [][]d
 	return paths, text, block
 }
 
-// renderMLeader draws a MULTILEADER: leader lines with filled arrowheads,
-// its text and its content block.
+// mleaderScale returns a MULTILEADER's overall scale (1 if unset).
+func mleaderScale(e *dxf.MLeader) float64 {
+	if e.Scale > 0 {
+		return e.Scale
+	}
+	return 1
+}
+
+// renderMLeader draws a MULTILEADER: leader lines with arrowheads, its text
+// and its content block. Its MLEADERSTYLE supplies what the entity leaves
+// unset: arrow block and size, text style, height and alignment, colours.
 func renderMLeader(r *Renderer, e *dxf.MLeader, layers map[string]dxf.Layer, blocks map[string]*dxf.Block,
-	ctx drawCtx, rgb RGB) {
+	ctx drawCtx, rgb RGB, lw float64) {
 
 	m := ctx.m
-	paths, text, block := mleaderParts(e, r.leaderArrows.blockNames())
+	look, hasStyle := r.leaderArrows.mleaderLook(e.StyleHandle)
+	var lookPtr *mleaderLook
+	lineRGB, arrowSize, arrowBlock := rgb, e.ArrowSize, ""
+	if hasStyle {
+		lookPtr = &look
+		lineRGB = objectColorRGB(look.lineColor, rgb)
+		if arrowSize <= 0 {
+			arrowSize = look.arrowSize * mleaderScale(e)
+		}
+		arrowBlock = look.arrowBlock
+		if look.lineWeight >= 0 {
+			lw = LineWeightToMM(look.lineWeight)
+		}
+		r.SetStyle(lineRGB, lw)
+	}
+	paths, text, block := mleaderParts(e, r.leaderArrows.blockNames(), lookPtr)
 	for _, path := range paths {
 		pts := make([][2]float64, len(path))
 		for i, p := range path {
@@ -200,17 +283,32 @@ func renderMLeader(r *Renderer, e *dxf.MLeader, layers map[string]dxf.Layer, blo
 		}
 		r.BreakPath()
 		r.DrawPolyline(pts, false)
-		if len(path) >= 2 && e.ArrowSize > 0 {
-			am := m.mul(arrowAffine(path[0], path[1], e.ArrowSize))
-			tri := make([][2]float64, 0, 3)
-			for _, p := range [3][2]float64{{0, 0}, {-1, 1.0 / 6}, {-1, -1.0 / 6}} {
-				x, y := am.apply(p[0], p[1])
-				tri = append(tri, [2]float64{x, y})
-			}
-			r.FillPolygons([][][2]float64{tri}, rgb)
+		if len(path) < 2 || arrowSize <= 0 {
+			continue
 		}
+		local := arrowAffine(path[0], path[1], arrowSize)
+		if blk, ok := blocks[arrowBlock]; ok && arrowBlock != "" {
+			actx := ctx.child(e, local.mul(translateAffine(-blk.BasePoint.X, -blk.BasePoint.Y)), layers)
+			for _, be := range blk.Entities {
+				renderEntity(r, be, layers, blocks, actx)
+			}
+			r.SetStyle(lineRGB, lw)
+			continue
+		}
+		am := m.mul(local)
+		tri := make([][2]float64, 0, 3)
+		for _, p := range [3][2]float64{{0, 0}, {-1, 1.0 / 6}, {-1, -1.0 / 6}} {
+			x, y := am.apply(p[0], p[1])
+			tri = append(tri, [2]float64{x, y})
+		}
+		r.FillPolygons([][][2]float64{tri}, lineRGB)
 	}
 	if text != nil {
+		if hasStyle {
+			if c := objectColorRGB(look.textColor, rgb); c != rgb {
+				text.SetColor24Bit(int(c.R)<<16 | int(c.G)<<8 | int(c.B))
+			}
+		}
 		renderEntity(r, text, layers, blocks, ctx)
 	}
 	if block != nil {

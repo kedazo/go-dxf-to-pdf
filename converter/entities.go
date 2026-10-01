@@ -374,7 +374,7 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		expandBBoxForEntity(bb, tableInsert(e), blocks, ctx)
 	case *dxf.MLeader:
 		// The content block is left out: resolving it takes the drawing.
-		paths, text, _ := mleaderParts(e, nil)
+		paths, text, _ := mleaderParts(e, nil, nil)
 		for _, path := range paths {
 			for _, p := range path {
 				expand(m, p.X, p.Y)
@@ -587,7 +587,7 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		renderLeader(r, e, layers, blocks, ctx, rgb)
 
 	case *dxf.MLeader:
-		renderMLeader(r, e, layers, blocks, ctx, rgb)
+		renderMLeader(r, e, layers, blocks, ctx, rgb, lw)
 
 	case *dxf.Table:
 		renderEntity(r, tableInsert(e), layers, blocks, ctx)

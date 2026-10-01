@@ -82,7 +82,7 @@ func TestMLeaderParts(t *testing.T) {
 		BlockNormal:       dxf.Vector{Z: 1},
 	}
 	ml.SetIsVisible(true)
-	paths, text, block := mleaderParts(ml, map[dxf.Handle]string{0x42: "TAG"})
+	paths, text, block := mleaderParts(ml, map[dxf.Handle]string{0x42: "TAG"}, nil)
 	want := []dxf.Point{{X: 0, Y: 0}, {X: 5, Y: 8}, {X: 10, Y: 10}, {X: 12, Y: 10}}
 	if len(paths) != 1 || len(paths[0]) != len(want) {
 		t.Fatalf("paths = %v, want %v", paths, want)
@@ -111,6 +111,46 @@ func TestMLeaderParts(t *testing.T) {
 	r.flush()
 	if r.c.Empty() {
 		t.Error("nothing drawn")
+	}
+}
+
+// A MULTILEADER takes what it leaves unset from its MLEADERSTYLE.
+func TestMLeaderStyle(t *testing.T) {
+	d := dxf.NewDrawing()
+	rec := dxf.NewBlockRecord()
+	rec.Name = "DOT"
+	rec.SetHandle(0x50)
+	d.BlockRecords = append(d.BlockRecords, *rec)
+	st := dxf.NewStyle()
+	st.Name = "NOTES"
+	st.SetHandle(0x60)
+	d.Styles = append(d.Styles, *st)
+	// kind in the high byte: 0xC0 ByLayer, 0xC2 true colour, 0xC3 ACI
+	objColor := func(kind, value uint32) dxf.ObjectColor { return dxf.ObjectColor(int32(kind<<24 | value)) }
+	d.MLeaderStyles = []dxf.MLeaderStyle{{
+		Handle: 0x70, ArrowheadHandle: 0x50, ArrowheadSize: 0.2, TextStyleHandle: 0x60, TextHeight: 0.25,
+		TextAlignment: 1, TextColor: objColor(0xC3, 1), LeaderLineColor: objColor(0xC2, 0x00FF00),
+		LeaderLineWeight: dxf.LineWeight(50),
+	}}
+	look, ok := newLeaderArrows(d).mleaderLook(0x70)
+	if !ok || look.arrowBlock != "DOT" || look.textStyle != "NOTES" || look.arrowSize != 0.2 || look.lineWeight != 50 {
+		t.Fatalf("look = %+v (ok %v)", look, ok)
+	}
+	if c := objectColorRGB(look.textColor, RGB{}); c != (RGB{255, 0, 0}) {
+		t.Errorf("text colour = %v, want ACI 1 red", c)
+	}
+	if c := objectColorRGB(look.lineColor, RGB{}); c != (RGB{0, 255, 0}) {
+		t.Errorf("leader colour = %v, want true colour green", c)
+	}
+	if c := objectColorRGB(objColor(0xC0, 0), RGB{1, 2, 3}); c != (RGB{1, 2, 3}) { // ByLayer
+		t.Errorf("ByLayer colour = %v, want the entity's", c)
+	}
+
+	ml := &dxf.MLeader{Scale: 2, HasText: true, Text: "Note", TextLocation: dxf.Point{X: 1}}
+	ml.SetIsVisible(true)
+	_, text, _ := mleaderParts(ml, nil, &look)
+	if text.TextStyleName != "NOTES" || !near(text.InitialTextHeight, 0.5) || text.AttachmentPoint != dxf.AttachmentPointTopCenter {
+		t.Errorf("text = style %q height %v attach %v", text.TextStyleName, text.InitialTextHeight, text.AttachmentPoint)
 	}
 }
 
