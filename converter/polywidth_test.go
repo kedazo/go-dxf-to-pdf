@@ -37,6 +37,25 @@ func TestWidePolylineBBox(t *testing.T) {
 	}
 }
 
+// POLYLINE vertices without 40/41 take the default widths; an explicit 0
+// stays thin.
+func TestPolylineVertexWidths(t *testing.T) {
+	p := dxf.NewPolyline()
+	p.DefaultStartingWidth, p.DefaultEndingWidth = 2, 2
+	thin := dxf.NewVertex()
+	thin.HasStartingWidth, thin.HasEndingWidth = true, true
+	thin.Location = dxf.Point{X: 0}
+	plain := dxf.NewVertex()
+	plain.Location = dxf.Point{X: 10}
+	last := dxf.NewVertex()
+	last.Location = dxf.Point{X: 20}
+	p.Vertices = []dxf.Vertex{*thin, *plain, *last}
+	edges := polylineEdges(p)
+	if len(edges) != 2 || edges[0].W0 != 0 || edges[0].W1 != 0 || edges[1].W0 != 2 || edges[1].W1 != 2 {
+		t.Errorf("edges = %+v, want widths 0/0 then 2/2", edges)
+	}
+}
+
 func TestWidePolylineJoins(t *testing.T) {
 	pl := dxf.NewLWPolyline()
 	pl.ConstantWidth = 1

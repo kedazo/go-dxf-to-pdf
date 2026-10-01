@@ -37,11 +37,13 @@ func simplePolylineEdges(p *dxf.Polyline) []polylineEdge {
 	// Spline-fit polylines carry both the frame control points and the fitted
 	// vertices; only the fitted ones describe the visible curve.
 	verts := make([]dxf.Vertex, 0, len(p.Vertices))
-	for _, v := range p.Vertices {
+	index := make([]int, 0, len(p.Vertices)) // of verts in p.Vertices
+	for i, v := range p.Vertices {
 		if v.IsSplineFrameControlPoint() {
 			continue
 		}
 		verts = append(verts, v)
+		index = append(index, i)
 	}
 	n := len(verts)
 	if n < 2 {
@@ -60,11 +62,8 @@ func simplePolylineEdges(p *dxf.Polyline) []polylineEdge {
 			X2: b.Location.X, Y2: b.Location.Y,
 			Bulge: a.Bulge,
 		}
-		if !p.Is3DPolyline() { // widths exist on 2D polylines only
-			edge.W0, edge.W1 = a.StartingWidth, a.EndingWidth
-			if edge.W0 == 0 && edge.W1 == 0 {
-				edge.W0, edge.W1 = p.DefaultStartingWidth, p.DefaultEndingWidth
-			}
+		if !p.Is3DPolyline() { // widths exist on 2D polylines only; an explicit 0 stays 0
+			edge.W0, edge.W1 = p.VertexWidths(index[i])
 		}
 		edges = append(edges, edge)
 	}
