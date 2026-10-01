@@ -256,6 +256,57 @@ func TestConvertAutoPaperWithoutPaper(t *testing.T) {
 	}
 }
 
+// Layers used only inside blocks must not be reported as empty.
+func TestInspectCountsBlockContent(t *testing.T) {
+	drawing := dxf.NewDrawing()
+	for _, name := range []string{"A", "A_Pen_No__1"} {
+		l := dxf.NewLayer()
+		l.Name = name
+		drawing.Layers = append(drawing.Layers, *l)
+	}
+	blk := dxf.NewBlock()
+	blk.Name = "B"
+	for i := 0; i < 3; i++ {
+		line := dxf.NewLine()
+		line.SetLayer("A_Pen_No__1")
+		line.P2 = dxf.Point{X: 1, Y: float64(i)}
+		blk.Entities = append(blk.Entities, line)
+	}
+	undeclared := dxf.NewLine()
+	undeclared.SetLayer("GHOST")
+	blk.Entities = append(blk.Entities, undeclared)
+	drawing.Blocks = append(drawing.Blocks, *blk)
+	for i := 0; i < 2; i++ { // two instances: the definition counts once
+		ins := dxf.NewInsert()
+		ins.Name = "B"
+		ins.SetLayer("A")
+		ins.Location = dxf.Point{X: float64(10 * i)}
+		drawing.Entities = append(drawing.Entities, ins)
+	}
+
+	path := filepath.Join(t.TempDir(), "blocks.dxf")
+	if err := drawing.SaveFile(path); err != nil {
+		t.Fatalf("saving DXF: %v", err)
+	}
+	info, err := Inspect(path, "")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	got := map[string]LayerInfo{}
+	for _, l := range info.Layers {
+		got[l.Name] = l
+	}
+	if l := got["A"]; l.EntityCount != 2 || l.BlockEntityCount != 0 {
+		t.Errorf("A = %+v, want 2 top-level", l)
+	}
+	if l := got["A_Pen_No__1"]; l.EntityCount != 0 || l.BlockEntityCount != 3 {
+		t.Errorf("A_Pen_No__1 = %+v, want 3 in blocks", l)
+	}
+	if l := got["GHOST"]; !l.Undeclared || l.BlockEntityCount != 1 {
+		t.Errorf("GHOST = %+v, want undeclared with 1 in blocks", l)
+	}
+}
+
 func TestConvertTiled(t *testing.T) {
 	drawing := dxf.NewDrawing()
 

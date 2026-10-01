@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 
 	dxf "github.com/kedazo/dxf-go"
 	"golang.org/x/text/encoding"
@@ -40,6 +42,8 @@ type LayerInfo struct {
 	Color      RGB
 	Visible    bool
 	EntityCount int
+	BlockEntityCount int  // entities on the layer inside the block definitions used by the drawing (each counted once)
+	Undeclared       bool // used by entities but missing from the LAYER table
 }
 
 // DrawingInfo contains metadata about a DXF/DWG drawing.
@@ -50,6 +54,9 @@ type DrawingInfo struct {
 	Layers      []LayerInfo
 	Blocks      []string
 	EntityCount int
+	LineTypes   []string       // non-continuous line types used by entities or layers
+	Warnings    []string       // what the parser skipped as malformed
+	Unsupported map[string]int // entity types the parser doesn't know, by count
 }
 
 // Inspect reads a DXF/DWG file and returns metadata without converting.
@@ -64,15 +71,52 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 		blockMap[drawing.Blocks[i].Name] = &drawing.Blocks[i]
 	}
 
-	// Count entities per layer
+	// Count entities per layer: top level, and inside the block definitions
+	// the drawing uses (each definition once, however often it is inserted).
 	layerCounts := make(map[string]int)
+	blockCounts := make(map[string]int)
+	lineTypes := make(map[string]bool)
+	noteLineType := func(name string) {
+		switch strings.ToUpper(name) {
+		case "", "BYLAYER", "BYBLOCK", "CONTINUOUS":
+		default:
+			lineTypes[name] = true
+		}
+	}
+	visited := make(map[string]bool)
+	var visitBlock func(name string, depth int)
+	visitBlocksOf := func(ent dxf.Entity, depth int) {
+		switch e := ent.(type) {
+		case *dxf.Insert:
+			visitBlock(e.Name, depth)
+		case dxf.Dimension:
+			visitBlock(e.BlockName(), depth)
+		}
+	}
+	visitBlock = func(name string, depth int) {
+		blk, ok := blockMap[name]
+		if !ok || visited[name] || depth > maxBlockDepth {
+			return
+		}
+		visited[name] = true
+		for _, ent := range blk.Entities {
+			blockCounts[ent.Layer()]++
+			noteLineType(ent.LineTypeName())
+			visitBlocksOf(ent, depth+1)
+		}
+	}
 	for _, ent := range drawing.Entities {
 		layerCounts[ent.Layer()]++
+		noteLineType(ent.LineTypeName())
+		visitBlocksOf(ent, 1)
 	}
 
 	// Build layer info
 	layers := make([]LayerInfo, 0, len(drawing.Layers))
+	declared := make(map[string]bool)
 	for _, l := range drawing.Layers {
+		declared[l.Name] = true
+		noteLineType(l.LineTypeName)
 		// DXF layer flags: bit 1 = frozen
 		// Note: negative color traditionally means "layer off", but dwg2dxf
 		// often exports all colors as negative regardless, so we use abs for color
@@ -82,13 +126,41 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 		if colorVal < 0 {
 			colorVal = -colorVal
 		}
+		color := ACIToRGB(colorVal)
+		if l.HasColor24Bit {
+			color = trueColorRGB(l.Color24Bit)
+		}
 		layers = append(layers, LayerInfo{
-			Name:        l.Name,
-			Color:       ACIToRGB(colorVal),
-			Visible:     !frozen,
-			EntityCount: layerCounts[l.Name],
+			Name:             l.Name,
+			Color:            color,
+			Visible:          !frozen,
+			EntityCount:      layerCounts[l.Name],
+			BlockEntityCount: blockCounts[l.Name],
 		})
 	}
+	var undeclared []string
+	for name := range layerCounts {
+		if !declared[name] {
+			undeclared = append(undeclared, name)
+		}
+	}
+	for name := range blockCounts {
+		if !declared[name] && layerCounts[name] == 0 {
+			undeclared = append(undeclared, name)
+		}
+	}
+	sort.Strings(undeclared)
+	for _, name := range undeclared {
+		layers = append(layers, LayerInfo{
+			Name: name, Color: ACIToRGB(7), Visible: true, Undeclared: true,
+			EntityCount: layerCounts[name], BlockEntityCount: blockCounts[name],
+		})
+	}
+	usedLineTypes := make([]string, 0, len(lineTypes))
+	for name := range lineTypes {
+		usedLineTypes = append(usedLineTypes, name)
+	}
+	sort.Strings(usedLineTypes)
 
 	// Block names (skip model/paper space internal blocks)
 	var blockNames []string
@@ -107,6 +179,9 @@ func Inspect(inputPath string, dwg2dxf string) (*DrawingInfo, error) {
 		Layers:      layers,
 		Blocks:      blockNames,
 		EntityCount: len(drawing.Entities),
+		LineTypes:   usedLineTypes,
+		Warnings:    drawing.Warnings,
+		Unsupported: drawing.UnsupportedEntities(),
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -62,12 +63,8 @@ func main() {
 
 		if cli.ListLayers {
 			for _, l := range info.Layers {
-				vis := ""
-				if !l.Visible {
-					vis = " (hidden)"
-				}
-				fmt.Printf("%-30s %4d entities  color=#%02X%02X%02X%s\n",
-					l.Name, l.EntityCount, l.Color.R, l.Color.G, l.Color.B, vis)
+				fmt.Printf("%-30s %s  color=#%02X%02X%02X%s\n",
+					l.Name, layerCounts(l), l.Color.R, l.Color.G, l.Color.B, layerNotes(l))
 			}
 			return
 		}
@@ -87,18 +84,41 @@ func main() {
 		if len(info.Layers) > 0 {
 			fmt.Printf("\nLayers:\n")
 			for _, l := range info.Layers {
-				vis := ""
-				if !l.Visible {
-					vis = " (hidden)"
-				}
-				fmt.Printf("  %-30s %4d entities%s\n", l.Name, l.EntityCount, vis)
+				fmt.Printf("  %-30s %s%s\n", l.Name, layerCounts(l), layerNotes(l))
 			}
+		}
+
+		if len(info.LineTypes) > 0 {
+			fmt.Printf("\nLine types: %s\n", strings.Join(info.LineTypes, ", "))
 		}
 
 		if len(info.Blocks) > 0 {
 			fmt.Printf("\nBlocks:\n")
 			for _, b := range info.Blocks {
 				fmt.Printf("  %s\n", b)
+			}
+		}
+
+		if len(info.Unsupported) > 0 {
+			types := make([]string, 0, len(info.Unsupported))
+			for t := range info.Unsupported {
+				types = append(types, t)
+			}
+			sort.Strings(types)
+			fmt.Printf("\nUnsupported entities (not drawn):\n")
+			for _, t := range types {
+				fmt.Printf("  %-20s %d\n", t, info.Unsupported[t])
+			}
+		}
+
+		if len(info.Warnings) > 0 {
+			fmt.Printf("\nParser warnings: %d\n", len(info.Warnings))
+			for i, w := range info.Warnings {
+				if i == 5 {
+					fmt.Printf("  ... and %d more\n", len(info.Warnings)-5)
+					break
+				}
+				fmt.Printf("  %s\n", w)
 			}
 		}
 		return
@@ -188,4 +208,24 @@ func main() {
 		bb.Width(), bb.Height(), result.Units,
 		bb.Width()*result.UnitFactor, bb.Height()*result.UnitFactor)
 	fmt.Printf("Converted to %s (%d page(s))\n", cli.Output, result.Pages)
+}
+
+// layerCounts formats a layer's top-level and in-block entity counts.
+func layerCounts(l converter.LayerInfo) string {
+	s := fmt.Sprintf("%4d entities", l.EntityCount)
+	if l.BlockEntityCount > 0 {
+		s += fmt.Sprintf(" (+%d in blocks)", l.BlockEntityCount)
+	}
+	return s
+}
+
+func layerNotes(l converter.LayerInfo) string {
+	s := ""
+	if !l.Visible {
+		s += " (frozen)"
+	}
+	if l.Undeclared {
+		s += " (not in layer table)"
+	}
+	return s
 }
