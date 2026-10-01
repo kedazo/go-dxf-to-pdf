@@ -425,12 +425,30 @@ type drawCtx struct {
 	layer string  // effective layer for block entities on layer "0" ("" = top level)
 	color RGB     // ByBlock color
 	lw    float64 // ByBlock line weight (mm)
+
+	filter   *layerFilter // --layers selection (nil = all)
+	selected bool         // an enclosing INSERT is on a selected layer
 }
 
 // maxBlockDepth guards against runaway (or cyclic) block nesting.
 const maxBlockDepth = 10
 
 var topCtx = drawCtx{m: identityAffine, lw: defaultLineWidthMM}
+
+// filtered returns the top-level context for a layer selection.
+func filtered(f *layerFilter) drawCtx {
+	ctx := topCtx
+	ctx.filter = f
+	return ctx
+}
+
+// keeps reports whether ent passes the layer selection: it is on a selected
+// layer itself, or it is part of a block inserted on one. INSERTs are always
+// walked, so block content on selected (pen sub)layers shows up even when the
+// INSERT sits on another layer.
+func (ctx drawCtx) keeps(ent dxf.Entity) bool {
+	return ctx.selected || ctx.filter.match(ctx.effectiveLayer(ent))
+}
 
 // effectiveLayer returns the layer an entity behaves as being on: entities
 // on layer "0" inside a block inherit the INSERT's layer.
@@ -444,14 +462,20 @@ func (ctx drawCtx) effectiveLayer(ent dxf.Entity) string {
 // child returns the context for the entities of a block inserted by ins
 // with instance transform local.
 func (ctx drawCtx) child(ins dxf.Entity, local affine, layers map[string]dxf.Layer) drawCtx {
-	rgb, lw := resolveStyle(ins, layers, ctx)
-	return drawCtx{
-		m:     ctx.m.mul(local),
-		depth: ctx.depth + 1,
-		layer: ctx.effectiveLayer(ins),
-		color: rgb,
-		lw:    lw,
-	}
+	c := ctx.inner(ins, local)
+	c.color, c.lw = resolveStyle(ins, layers, ctx)
+	return c
+}
+
+// inner is child without the style: transform, nesting and layer selection
+// only (enough for extents).
+func (ctx drawCtx) inner(ins dxf.Entity, local affine) drawCtx {
+	c := ctx
+	c.m = ctx.m.mul(local)
+	c.depth = ctx.depth + 1
+	c.layer = ctx.effectiveLayer(ins)
+	c.selected = ctx.keeps(ins)
+	return c
 }
 
 // resolveStyle resolves an entity's color and line weight: true color wins,
@@ -493,20 +517,29 @@ func trueColorRGB(c int) RGB {
 // Entities inside INSERT blocks are mapped through the accumulated insert
 // transform so the bbox captures their actual placement.
 func ComputeBoundingBox(entities []dxf.Entity, blocks map[string]*dxf.Block) BBox {
+	return selectionBBox(entities, blocks, nil)
+}
+
+// selectionBBox is the bounding box of the entities passing the layer
+// selection f (nil = all).
+func selectionBBox(entities []dxf.Entity, blocks map[string]*dxf.Block, f *layerFilter) BBox {
 	bb := NewBBox()
+	ctx := filtered(f)
 	for _, ent := range entities {
-		expandBBoxForEntity(&bb, ent, blocks, identityAffine, 0)
+		expandBBoxForEntity(&bb, ent, blocks, ctx)
 	}
 	return bb
 }
 
-// entityBoxes returns the world bbox of every top-level entity. Entities
-// without a known extent get an empty bbox (see cullEntities).
-func entityBoxes(entities []dxf.Entity, blocks map[string]*dxf.Block) []BBox {
+// entityBoxes returns the world bbox of every top-level entity (of its parts
+// passing the layer selection f). Entities without a known extent get an
+// empty bbox (see cullEntities).
+func entityBoxes(entities []dxf.Entity, blocks map[string]*dxf.Block, f *layerFilter) []BBox {
 	boxes := make([]BBox, len(entities))
+	ctx := filtered(f)
 	for i, ent := range entities {
 		boxes[i] = NewBBox()
-		expandBBoxForEntity(&boxes[i], ent, blocks, identityAffine, 0)
+		expandBBoxForEntity(&boxes[i], ent, blocks, ctx)
 	}
 	return boxes
 }
@@ -598,11 +631,15 @@ func expandEllipticArc(bb *BBox, cx, cy, ux, uy, vx, vy, t0, t1 float64) {
 }
 
 // expandBBoxForEntity expands the bounding box with the given entity, mapped
-// through m (block-local → world).
-func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block, m affine, depth int) {
-	if depth > maxBlockDepth || !ent.IsVisible() {
+// through ctx.m (block-local → world), if it passes the layer selection.
+func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block, ctx drawCtx) {
+	if ctx.depth > maxBlockDepth || !ent.IsVisible() {
 		return
 	}
+	if _, isInsert := ent.(*dxf.Insert); !isInsert && !ctx.keeps(ent) {
+		return
+	}
+	m := ctx.m
 
 	expand := func(t affine, x, y float64) {
 		bb.Expand(t.apply(x, y))
@@ -656,14 +693,15 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 	case *dxf.Insert:
 		if blk, ok := blocks[e.Name]; ok {
 			for _, local := range insertInstances(e, blk.BasePoint) {
-				cm := m.mul(local)
+				cctx := ctx.inner(e, local)
 				for _, be := range blk.Entities {
-					expandBBoxForEntity(bb, be, blocks, cm, depth+1)
+					expandBBoxForEntity(bb, be, blocks, cctx)
 				}
 			}
 		}
+		actx := ctx.inner(e, identityAffine)
 		for i := range e.Attributes {
-			expandBBoxForEntity(bb, &e.Attributes[i], blocks, m, depth+1)
+			expandBBoxForEntity(bb, &e.Attributes[i], blocks, actx)
 		}
 	case *dxf.Attribute:
 		if !e.IsInvisible() {
@@ -682,8 +720,10 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		// geometry in world coordinates (relative to the dimension's space).
 		if dim, ok := ent.(dxf.Dimension); ok {
 			if blk, ok := blocks[dim.BlockName()]; ok {
+				dctx := ctx.inner(ent, identityAffine)
+				dctx.selected = true // the dimension itself passed the selection
 				for _, be := range blk.Entities {
-					expandBBoxForEntity(bb, be, blocks, m, depth+1)
+					expandBBoxForEntity(bb, be, blocks, dctx)
 				}
 			}
 		}
@@ -692,25 +732,24 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 
 // RenderEntities renders all DXF entities to the PDF renderer.
 func RenderEntities(r *Renderer, entities []dxf.Entity, layers map[string]dxf.Layer,
-	blocks map[string]*dxf.Block, layerFilter map[string]bool) {
+	blocks map[string]*dxf.Block, sel *layerFilter) {
 
+	ctx := filtered(sel)
 	for _, ent := range entities {
-		renderEntity(r, ent, layers, blocks, layerFilter, topCtx)
+		renderEntity(r, ent, layers, blocks, ctx)
 	}
 }
 
 func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
-	blocks map[string]*dxf.Block, layerFilter map[string]bool, ctx drawCtx) {
+	blocks map[string]*dxf.Block, ctx drawCtx) {
 
 	if ctx.depth > maxBlockDepth || !ent.IsVisible() {
 		return
 	}
 
-	// Layer filter (entities on layer "0" inside blocks follow the INSERT)
-	if layerFilter != nil {
-		if _, ok := layerFilter[ctx.effectiveLayer(ent)]; !ok {
-			return
-		}
+	// Layer selection; INSERTs are always walked (see keeps).
+	if _, isInsert := ent.(*dxf.Insert); !isInsert && !ctx.keeps(ent) {
+		return
 	}
 
 	rgb, lw := resolveStyle(ent, layers, ctx)
@@ -828,7 +867,7 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 			for _, local := range insertInstances(e, blk.BasePoint) {
 				cctx := ctx.child(e, local, layers)
 				for _, be := range blk.Entities {
-					renderEntity(r, be, layers, blocks, layerFilter, cctx)
+					renderEntity(r, be, layers, blocks, cctx)
 				}
 			}
 		}
@@ -836,19 +875,20 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		// placed), so they take the parent transform, not the block's.
 		actx := ctx.child(e, identityAffine, layers)
 		for i := range e.Attributes {
-			renderEntity(r, &e.Attributes[i], layers, blocks, layerFilter, actx)
+			renderEntity(r, &e.Attributes[i], layers, blocks, actx)
 		}
 
 	default:
 		// DIMENSION entities reference an anonymous block containing their geometry.
 		// The block entities are in world coordinates (basePoint=0,0) and may be on
-		// sublayers (e.g. "Layer_Pen_No__1"), so we bypass the layer filter here —
-		// the dimension entity itself already passed the filter above.
+		// sublayers (e.g. "Layer_Pen_No__1"), so the whole block is selected —
+		// the dimension entity itself already passed the selection above.
 		if dim, ok := ent.(dxf.Dimension); ok {
 			if blk, ok := blocks[dim.BlockName()]; ok {
 				dctx := ctx.child(ent, identityAffine, layers)
+				dctx.selected = true
 				for _, be := range blk.Entities {
-					renderEntity(r, be, layers, blocks, nil, dctx)
+					renderEntity(r, be, layers, blocks, dctx)
 				}
 			}
 		}

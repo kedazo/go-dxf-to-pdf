@@ -16,7 +16,7 @@ type CLI struct {
 	Paper       string   `default:"A4" help:"Paper size: A0-A4 or WxH in mm (e.g. 400x300)."`
 	Margin      float64  `default:"10" help:"Margin in mm (uniform on all sides)."`
 	Align       string   `default:"center" enum:"center,bottom-left,top-left" help:"Drawing alignment on page."`
-	Layers      []string `optional:"" help:"Include only these layers (comma-separated)."`
+	Layers      []string `optional:"" help:"Include only these layers (comma-separated, case-insensitive, globs like 'Wall*' allowed). A layer also selects its ArchiCAD pen sublayers (X_Pen_No__N) and the full content of blocks inserted on it. The page is sized to the selection."`
 	Tile        bool     `help:"Tile drawing across multiple pages if it exceeds paper size."`
 	Dwg2Dxf     string   `optional:"" help:"Path to dwg2dxf binary (for DWG files). Default: auto-detect from PATH."`
 	DebugBBox   bool     `help:"Draw red bounding box rectangle on the output for debugging."`

@@ -252,18 +252,16 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		blockMap[drawing.Blocks[i].Name] = &drawing.Blocks[i]
 	}
 
-	// Layer filter
-	var layerFilter map[string]bool
-	if len(opts.Layers) > 0 {
-		layerFilter = make(map[string]bool)
-		for _, l := range opts.Layers {
-			layerFilter[l] = true
-		}
-	}
+	// Layer selection; the page frame follows it.
+	sel := newLayerFilter(opts.Layers)
 
 	// Compute bounding box
-	bbox := ComputeBoundingBox(drawing.Entities, blockMap)
+	bbox := selectionBBox(drawing.Entities, blockMap, sel)
+	bbox.padFlat()
 	if bbox.Width() <= 0 || bbox.Height() <= 0 {
+		if sel != nil {
+			return nil, fmt.Errorf("no renderable entities on the selected layers %q", opts.Layers)
+		}
 		return nil, fmt.Errorf("empty drawing or no renderable entities")
 	}
 
@@ -290,7 +288,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		r.SetBatching(isPDF)
 		t := NewTransform(bbox, effectiveScale, paper, margin, ParseAlignment(opts.Align), false)
 		r.SetTransform(t)
-		RenderEntities(r, drawing.Entities, layerMap, blockMap, layerFilter)
+		RenderEntities(r, drawing.Entities, layerMap, blockMap, sel)
 		if opts.DebugBBox {
 			r.DrawDebugBBox(bbox)
 		}
@@ -328,7 +326,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 		r := NewRenderer(paper, landscape, margin, opts.FontDir)
 		r.SetBatching(isPDF)
 		r.SetTransform(t)
-		RenderEntities(r, drawing.Entities, layerMap, blockMap, layerFilter)
+		RenderEntities(r, drawing.Entities, layerMap, blockMap, sel)
 
 		if opts.DebugBBox {
 			r.DrawDebugBBox(bbox)
@@ -356,7 +354,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 	renderer := NewRenderer(paper, landscape, margin, opts.FontDir)
 	renderer.SetBatching(isPDF)
 	totalPages := grid.Cols * grid.Rows
-	boxes := entityBoxes(drawing.Entities, blockMap)
+	boxes := entityBoxes(drawing.Entities, blockMap, sel)
 
 	for row := 0; row < grid.Rows; row++ {
 		for col := 0; col < grid.Cols; col++ {
@@ -386,7 +384,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options) (*Result
 				MaxX: tileBBox.MaxX + slack, MaxY: tileBBox.MaxY + slack,
 			}
 			renderer.SetClipRect(margin, margin, printW, printH)
-			RenderEntities(renderer, cullEntities(drawing.Entities, boxes, cullBox), layerMap, blockMap, layerFilter)
+			RenderEntities(renderer, cullEntities(drawing.Entities, boxes, cullBox), layerMap, blockMap, sel)
 			renderer.ClipEnd()
 			if !opts.Transparent {
 				renderer.MaskOutside(margin, margin, printW, printH)

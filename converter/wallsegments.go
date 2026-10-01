@@ -279,13 +279,7 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 	for i := range drawing.Blocks {
 		blockMap[drawing.Blocks[i].Name] = &drawing.Blocks[i]
 	}
-	var layerFilter map[string]bool
-	if len(opts.Layers) > 0 {
-		layerFilter = make(map[string]bool)
-		for _, l := range opts.Layers {
-			layerFilter[l] = true
-		}
-	}
+	sel := newLayerFilter(opts.Layers)
 
 	unitFactor := UnitsToMM(drawing.Header.DefaultDrawingUnits)
 	unitToMeters := unitFactor / 1000.0
@@ -315,15 +309,16 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 	}
 
 	// Same bbox the PNG uses — this is what makes the scene coords PNG-aligned.
-	bbox := ComputeBoundingBox(drawing.Entities, blockMap)
+	bbox := selectionBBox(drawing.Entities, blockMap, sel)
 	if bbox.Width() <= 0 || bbox.Height() <= 0 {
 		return nil, fmt.Errorf("empty drawing or no renderable entities")
 	}
 
 	// Collect raw segments in DXF world coordinates (identity insert transform).
 	var raws []rawSeg
+	ctx := filtered(sel)
 	for _, ent := range drawing.Entities {
-		collectSegments(&raws, ent, layerMap, blockMap, layerFilter, opts, topCtx)
+		collectSegments(&raws, ent, layerMap, blockMap, opts, ctx)
 	}
 
 	// DXF world -> scene meters (Y-down, PNG-aligned). Mirrors transform.go X/Y
@@ -433,16 +428,13 @@ func thicknessClusters(walls []XMLWall, n int) []ThicknessBin {
 // transform threading (so collected coords share the bbox space exactly) but
 // appends instead of drawing.
 func collectSegments(out *[]rawSeg, ent dxf.Entity, layers map[string]dxf.Layer,
-	blocks map[string]*dxf.Block, layerFilter map[string]bool, opts WallSegmentsOptions,
-	ctx drawCtx) {
+	blocks map[string]*dxf.Block, opts WallSegmentsOptions, ctx drawCtx) {
 
 	if ctx.depth > maxBlockDepth || !ent.IsVisible() {
 		return
 	}
-	if layerFilter != nil {
-		if _, ok := layerFilter[ent.Layer()]; !ok {
-			return
-		}
+	if _, isInsert := ent.(*dxf.Insert); !isInsert && !ctx.keeps(ent) {
+		return
 	}
 
 	_, lwMM := resolveStyle(ent, layers, ctx)
@@ -506,7 +498,7 @@ func collectSegments(out *[]rawSeg, ent dxf.Entity, layers map[string]dxf.Layer,
 			for _, local := range insertInstances(e, blk.BasePoint) {
 				cctx := ctx.child(e, local, layers)
 				for _, be := range blk.Entities {
-					collectSegments(out, be, layers, blocks, layerFilter, opts, cctx)
+					collectSegments(out, be, layers, blocks, opts, cctx)
 				}
 			}
 		}

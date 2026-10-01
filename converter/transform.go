@@ -31,6 +31,21 @@ func NewBBox() BBox {
 	}
 }
 
+// padFlat gives a box that is flat in one direction (a single horizontal or
+// vertical line) 1% of its other size there, so it can be fitted to paper.
+// Empty and point-sized boxes are left alone.
+func (b *BBox) padFlat() {
+	w, h := b.Width(), b.Height()
+	switch {
+	case w > 0 && h == 0:
+		b.MinY -= w / 200
+		b.MaxY += w / 200
+	case h > 0 && w == 0:
+		b.MinX -= h / 200
+		b.MaxX += h / 200
+	}
+}
+
 type Alignment int
 
 const (
