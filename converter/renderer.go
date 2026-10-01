@@ -119,14 +119,30 @@ func (r *Renderer) clipFillRule(p *canvas.Path, rule canvas.FillRule) *canvas.Pa
 		case b.X1 < r.clip.X0 || b.X0 > r.clip.X1 || b.Y1 < r.clip.Y0 || b.Y0 > r.clip.Y1:
 			return &canvas.Path{}
 		case b.X0 < r.clip.X0 || b.X1 > r.clip.X1 || b.Y0 < r.clip.Y0 || b.Y1 > r.clip.Y1:
-			p = p.Settle(rule).And(canvas.Rectangle(r.clip.W(), r.clip.H()).Translate(r.clip.X0, r.clip.Y0))
-			rule = canvas.NonZero // settled
+			// Uncut where canvas fails: the tile mask hides the spill.
+			if q, ok := intersectFill(p, rule, canvas.Rectangle(r.clip.W(), r.clip.H()).Translate(r.clip.X0, r.clip.Y0)); ok {
+				p, rule = q, canvas.NonZero // settled
+			}
 		}
 	}
 	if r.clipPoly == nil {
 		return p
 	}
-	return p.Settle(rule).And(polygonPath(r.clipPoly))
+	if q, ok := intersectFill(p, rule, polygonPath(r.clipPoly)); ok {
+		return q
+	}
+	return &canvas.Path{} // better lost than spilling out of the viewport
+}
+
+// intersectFill intersects a fill path with a clip path; ok is false where
+// canvas' boolean operations panic (degenerate geometry).
+func intersectFill(p *canvas.Path, rule canvas.FillRule, clip *canvas.Path) (q *canvas.Path, ok bool) {
+	defer func() {
+		if recover() != nil {
+			q, ok = nil, false
+		}
+	}()
+	return p.Settle(rule).And(clip), true
 }
 
 // polygonPath is a closed path through the points.
@@ -733,6 +749,7 @@ type mtextItem struct {
 	look  textLook
 	x     float64 // offset from the line start in page mm
 	width float64 // drawn width (with the look's horizontal scale)
+	ink   float64 // width without trailing spaces
 	h     float64 // cap height in page mm
 	rise  float64 // baseline raise in page mm (super/subscripts)
 	col   color.RGBA
@@ -848,20 +865,24 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		}
 		x0 = max(x0, indent*defaultScaledH)
 	}
+	canBreak := false // the line may wrap before the next piece (after a space or tab)
 	place := func(it mtextItem, inkWidth float64) {
 		begin(it.seg.Style.Paragraph)
 		last := len(lines) - 1
 		limit := wrapWidthMM - paras[last].RightIndent*defaultScaledH
-		if wrapWidthMM > 0 && len(lines[last]) > 0 && x0+inkWidth > limit {
+		if wrapWidthMM > 0 && canBreak && len(lines[last]) > 0 && x0+inkWidth > limit {
 			newLine(false)
 			begin(it.seg.Style.Paragraph)
 			last++
 		}
 		it.x = x0
+		it.ink = inkWidth
 		x0 += it.width
 		lines[last] = append(lines[last], it)
+		canBreak = it.width > inkWidth // ends with a space
 	}
 	tab := func(p dxf.MTextParagraph) {
+		canBreak = true
 		begin(p)
 		for _, stop := range p.TabStops { // centre and right stops are taken as left ones
 			if pos := stop.Position * defaultScaledH; pos > x0+1e-9 {
@@ -981,7 +1002,7 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 			return 0
 		}
 		last := items[len(items)-1]
-		return last.x + last.width
+		return last.x + last.ink // trailing spaces don't count for alignment
 	}
 	maxW := 0.0
 	for _, items := range lines {
@@ -1014,7 +1035,8 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		case dxf.MTextParagraphAlignmentRight:
 			align = 1
 		}
-		lineX := boxLeft + (boxW-lineWidth(items))*align
+		// Lines align between the indents (the left one is in the item offsets).
+		lineX := boxLeft + (boxW-paras[li].RightIndent*defaultScaledH-lineWidth(items))*align
 		curY := firstBaseline + float64(li)*advance
 
 		for _, it := range items {

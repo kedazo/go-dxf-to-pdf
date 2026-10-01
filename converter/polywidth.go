@@ -44,6 +44,20 @@ func (e polylineEdge) isWide() bool {
 }
 
 // maxHalfWidth returns half the largest width of the edges.
+// expandWideOutline grows a bbox (through expand) by the filled outline of a
+// wide polyline, arcs and joins included; nothing for zero-width ones.
+func expandWideOutline(expand func(m affine, x, y float64), om affine, edges []polylineEdge, closed bool) {
+	hw := maxHalfWidth(edges)
+	if hw <= 0 {
+		return
+	}
+	for _, piece := range widePolylinePieces(edges, closed, hw/20) {
+		for _, p := range piece {
+			expand(om, p[0], p[1])
+		}
+	}
+}
+
 func maxHalfWidth(edges []polylineEdge) float64 {
 	w := 0.0
 	for _, e := range edges {

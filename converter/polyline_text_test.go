@@ -293,6 +293,15 @@ func TestMTextParagraphs(t *testing.T) {
 	if b := drawn(`\pqc;ab`, 100); math.Abs((b.X0+b.X1)/2-60) > 1 {
 		t.Errorf("centred: text spans %v..%v, want it centred at 60", b.X0, b.X1)
 	}
+	// A colour change inside a word is no place to wrap, however narrow the box.
+	if b := drawn(`ab{\C1;cdefgh}`, 1); b.H() > 12 { // one line is ~8 mm, the pitch 8.3 mm
+		t.Errorf("word split across lines: text is %v mm tall", b.H())
+	}
+	// Trailing spaces don't shift a right-aligned line (they hang past the
+	// right edge, so compare the left one).
+	if a, b := drawn(`\pqr;ab`, 100), drawn(`\pqr;ab  `, 100); math.Abs(a.X0-b.X0) > 0.01 {
+		t.Errorf("trailing spaces moved the line from x=%v to %v", a.X0, b.X0)
+	}
 	segs := ParseMText(`\S1#2;`)
 	if len(segs) != 1 || !segs[0].Style.Stacked || segs[0].Style.StackType != dxf.MTextStackDiagonal ||
 		segs[0].Style.Numerator != "1" || segs[0].Style.Denominator != "2" {

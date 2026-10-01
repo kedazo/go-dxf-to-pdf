@@ -270,11 +270,14 @@ func renderMLeader(r *Renderer, e *dxf.MLeader, layers map[string]dxf.Layer, blo
 			arrowSize = look.arrowSize * mleaderScale(e)
 		}
 		arrowBlock = look.arrowBlock
-		if look.lineWeight >= 0 {
+		if look.lineWeight > 0 { // 0 is also what a missing group 92 reads as
 			lw = LineWeightToMM(look.lineWeight)
 		}
-		r.SetStyle(lineRGB, lw)
 	}
+	// The entity's line type stays (the dash pattern is set for it).
+	offset, dashes := r.dashOffset, r.dashes
+	setLineStyle := func() { r.SetDashedStyle(lineRGB, lw, offset, dashes) }
+	setLineStyle()
 	paths, text, block := mleaderParts(e, r.leaderArrows.blockNames(), lookPtr)
 	for _, path := range paths {
 		pts := make([][2]float64, len(path))
@@ -292,7 +295,7 @@ func renderMLeader(r *Renderer, e *dxf.MLeader, layers map[string]dxf.Layer, blo
 			for _, be := range blk.Entities {
 				renderEntity(r, be, layers, blocks, actx)
 			}
-			r.SetStyle(lineRGB, lw)
+			setLineStyle()
 			continue
 		}
 		am := m.mul(local)

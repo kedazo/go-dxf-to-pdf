@@ -328,13 +328,9 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 	case *dxf.LWPolyline:
 		om := m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation()))
 		verts := e.Vertices
-		hw := maxHalfWidth(lwPolylineEdges(e))
+		expandWideOutline(expand, om, lwPolylineEdges(e), e.IsClosed())
 		for i, v := range verts {
 			expand(om, v.X, v.Y)
-			if hw > 0 { // wide polylines reach past their vertices
-				expand(om, v.X-hw, v.Y-hw)
-				expand(om, v.X+hw, v.Y+hw)
-			}
 			if j := i + 1; j < len(verts) || (e.IsClosed() && len(verts) > 1) {
 				w := verts[j%len(verts)]
 				expandBulge(bb, om, v.X, v.Y, w.X, w.Y, v.Bulge)
@@ -345,14 +341,10 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		// (0,0,0) and would drag the bbox to the origin.
 		om := m.mul(polyline2DAffine(e))
 		edges := polylineEdges(e)
-		hw := maxHalfWidth(edges)
+		expandWideOutline(expand, om, edges, !e.IsPolyfaceMesh() && !e.Is3DPolygonMesh() && e.IsClosed())
 		for _, edge := range edges {
 			expand(om, edge.X1, edge.Y1)
 			expand(om, edge.X2, edge.Y2)
-			if hw > 0 {
-				expand(om, edge.X1-hw, edge.Y1-hw)
-				expand(om, edge.X1+hw, edge.Y1+hw)
-			}
 			expandBulge(bb, om, edge.X1, edge.Y1, edge.X2, edge.Y2, edge.Bulge)
 		}
 	case *dxf.Spline:

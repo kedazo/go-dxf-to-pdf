@@ -20,6 +20,23 @@ func TestWideSegmentTrapezoid(t *testing.T) {
 
 // A closed square with constant width: four bands and four mitered corners,
 // whose miter tips sit diagonally out from the vertices.
+// The bbox covers a wide polyline's outline: past the last vertex and
+// beyond the arc of a bulge.
+func TestWidePolylineBBox(t *testing.T) {
+	diag := dxf.NewLWPolyline()
+	diag.ConstantWidth = 2
+	diag.Vertices = []dxf.LwVertex{{X: 0, Y: 0}, {X: 10, Y: 10}}
+	if bb := ComputeBoundingBox([]dxf.Entity{diag}, nil); math.Abs(bb.MaxY-(10+math.Sqrt2/2)) > 1e-6 {
+		t.Errorf("diagonal bbox MaxY = %v, want %v", bb.MaxY, 10+math.Sqrt2/2)
+	}
+	semi := dxf.NewLWPolyline() // a semicircle of radius 5 below the x axis
+	semi.ConstantWidth = 2
+	semi.Vertices = []dxf.LwVertex{{X: -5, Y: 0, Bulge: 1}, {X: 5, Y: 0}}
+	if bb := ComputeBoundingBox([]dxf.Entity{semi}, nil); bb.MinY > -5.99 {
+		t.Errorf("semicircle bbox MinY = %v, want about -6", bb.MinY)
+	}
+}
+
 func TestWidePolylineJoins(t *testing.T) {
 	pl := dxf.NewLWPolyline()
 	pl.ConstantWidth = 1
