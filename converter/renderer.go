@@ -96,10 +96,16 @@ func (r *Renderer) textClippedOut(px, py, x0, y0, x1, y1, rotDeg float64) bool {
 
 // clipFill cuts a fill path (even-odd) to the clip polygon.
 func (r *Renderer) clipFill(p *canvas.Path) *canvas.Path {
+	return r.clipFillRule(p, canvas.EvenOdd)
+}
+
+// clipFillRule cuts a fill path, filled with the given rule, to the clip
+// polygon.
+func (r *Renderer) clipFillRule(p *canvas.Path, rule canvas.FillRule) *canvas.Path {
 	if r.clipPoly == nil {
 		return p
 	}
-	return p.Settle(canvas.EvenOdd).And(polygonPath(r.clipPoly))
+	return p.Settle(rule).And(polygonPath(r.clipPoly))
 }
 
 // polygonPath is a closed path through the points.
@@ -409,6 +415,33 @@ func (r *Renderer) DrawSolid(x1, y1, x2, y2, x3, y3, x4, y4 float64) {
 // FillPolygons fills a set of closed loops (DXF world coordinates) as one
 // shape with the even-odd rule, so inner loops become holes.
 func (r *Renderer) FillPolygons(polys [][][2]float64, col RGB) {
+	r.fillPolygons(polys, col, canvas.EvenOdd)
+}
+
+// FillUnion fills the union of closed loops (DXF world coordinates) that may
+// overlap: drawn as one shape, so no seams show where they meet. The loops
+// are turned to the same orientation for the non-zero rule.
+func (r *Renderer) FillUnion(polys [][][2]float64, col RGB) {
+	oriented := make([][][2]float64, 0, len(polys))
+	for _, poly := range polys {
+		area := 0.0
+		for i := range poly {
+			a, b := poly[i], poly[(i+1)%len(poly)]
+			area += a[0]*b[1] - b[0]*a[1]
+		}
+		if area < 0 {
+			rev := make([][2]float64, len(poly))
+			for i, v := range poly {
+				rev[len(poly)-1-i] = v
+			}
+			poly = rev
+		}
+		oriented = append(oriented, poly)
+	}
+	r.fillPolygons(oriented, col, canvas.NonZero)
+}
+
+func (r *Renderer) fillPolygons(polys [][][2]float64, col RGB, rule canvas.FillRule) {
 	p := &canvas.Path{}
 	for _, poly := range polys {
 		if len(poly) < 3 {
@@ -427,8 +460,8 @@ func (r *Renderer) FillPolygons(polys [][][2]float64, col RGB) {
 	r.ctx.Push()
 	r.ctx.SetFillColor(color.RGBA{col.R, col.G, col.B, 255})
 	r.ctx.SetStrokeColor(color.RGBA{0, 0, 0, 0})
-	r.ctx.SetFillRule(canvas.EvenOdd)
-	r.ctx.DrawPath(0, 0, r.clipFill(p))
+	r.ctx.SetFillRule(rule)
+	r.ctx.DrawPath(0, 0, r.clipFillRule(p, rule))
 	r.ctx.Pop()
 }
 

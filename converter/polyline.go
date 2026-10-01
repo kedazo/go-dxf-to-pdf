@@ -10,6 +10,7 @@ import (
 type polylineEdge struct {
 	X1, Y1, X2, Y2 float64
 	Bulge          float64
+	W0, W1         float64 // start and end width (0 = a plain line)
 }
 
 // polylineEdges flattens a POLYLINE into its visible edges. It understands the
@@ -54,11 +55,18 @@ func simplePolylineEdges(p *dxf.Polyline) []polylineEdge {
 	edges := make([]polylineEdge, 0, count)
 	for i := 0; i < count; i++ {
 		a, b := verts[i], verts[(i+1)%n]
-		edges = append(edges, polylineEdge{
+		edge := polylineEdge{
 			X1: a.Location.X, Y1: a.Location.Y,
 			X2: b.Location.X, Y2: b.Location.Y,
 			Bulge: a.Bulge,
-		})
+		}
+		if !p.Is3DPolyline() { // widths exist on 2D polylines only
+			edge.W0, edge.W1 = a.StartingWidth, a.EndingWidth
+			if edge.W0 == 0 && edge.W1 == 0 {
+				edge.W0, edge.W1 = p.DefaultStartingWidth, p.DefaultEndingWidth
+			}
+		}
+		edges = append(edges, edge)
 	}
 	return edges
 }

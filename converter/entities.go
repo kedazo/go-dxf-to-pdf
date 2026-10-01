@@ -328,8 +328,13 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 	case *dxf.LWPolyline:
 		om := m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation()))
 		verts := e.Vertices
+		hw := maxHalfWidth(lwPolylineEdges(e))
 		for i, v := range verts {
 			expand(om, v.X, v.Y)
+			if hw > 0 { // wide polylines reach past their vertices
+				expand(om, v.X-hw, v.Y-hw)
+				expand(om, v.X+hw, v.Y+hw)
+			}
 			if j := i + 1; j < len(verts) || (e.IsClosed() && len(verts) > 1) {
 				w := verts[j%len(verts)]
 				expandBulge(bb, om, v.X, v.Y, w.X, w.Y, v.Bulge)
@@ -339,9 +344,15 @@ func expandBBoxForEntity(bb *BBox, ent dxf.Entity, blocks map[string]*dxf.Block,
 		// Use the edges, not the raw vertices: polyface face records sit at
 		// (0,0,0) and would drag the bbox to the origin.
 		om := m.mul(polyline2DAffine(e))
-		for _, edge := range polylineEdges(e) {
+		edges := polylineEdges(e)
+		hw := maxHalfWidth(edges)
+		for _, edge := range edges {
 			expand(om, edge.X1, edge.Y1)
 			expand(om, edge.X2, edge.Y2)
+			if hw > 0 {
+				expand(om, edge.X1-hw, edge.Y1-hw)
+				expand(om, edge.X1+hw, edge.Y1+hw)
+			}
 			expandBulge(bb, om, edge.X1, edge.Y1, edge.X2, edge.Y2, edge.Bulge)
 		}
 	case *dxf.Spline:
@@ -526,13 +537,11 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 		r.DrawEllipticArc(cx, cy, ux, uy, vx, vy, t0, t1)
 
 	case *dxf.LWPolyline:
-		renderLWPolyline(r, e, m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation())))
+		renderLWPolyline(r, e, m.mul(ocsAffine(e.ExtrusionDirection, e.Elevation())), rgb)
 
 	case *dxf.Polyline:
-		om := m.mul(polyline2DAffine(e))
-		for _, edge := range polylineEdges(e) {
-			drawEdge(r, om, edge.X1, edge.Y1, edge.X2, edge.Y2, edge.Bulge)
-		}
+		simple := !e.IsPolyfaceMesh() && !e.Is3DPolygonMesh()
+		renderPolylineEdges(r, polylineEdges(e), simple && e.IsClosed(), m.mul(polyline2DAffine(e)), rgb)
 
 	case *dxf.Spline:
 		cps := make([][2]float64, len(e.ControlPoints))
@@ -754,20 +763,8 @@ func drawEdge(r *Renderer, m affine, x1, y1, x2, y2, bulge float64) {
 	r.DrawLine(wx1, wy1, wx2, wy2)
 }
 
-func renderLWPolyline(r *Renderer, e *dxf.LWPolyline, m affine) {
-	verts := e.Vertices
-	n := len(verts)
-	if n < 2 {
-		return
-	}
-	count := n - 1
-	if e.IsClosed() {
-		count = n
-	}
-	for i := 0; i < count; i++ {
-		a, b := verts[i], verts[(i+1)%n]
-		drawEdge(r, m, a.X, a.Y, b.X, b.Y, a.Bulge)
-	}
+func renderLWPolyline(r *Renderer, e *dxf.LWPolyline, m affine, rgb RGB) {
+	renderPolylineEdges(r, lwPolylineEdges(e), e.IsClosed(), m, rgb)
 }
 
 
