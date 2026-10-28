@@ -87,8 +87,8 @@ func TestWallStructureElementsPolygonsStamps(t *testing.T) {
 	// the zone and its stamp, which live on another layer.
 	doc, _ := emitAndParse(t, structureDrawing(), WallSegmentsOptions{Layers: []string{"WALLS"}})
 
-	if doc.Version != "2" {
-		t.Errorf("version = %q, want 2", doc.Version)
+	if doc.Version != "3" {
+		t.Errorf("version = %q, want 3", doc.Version)
 	}
 	if len(doc.Elements) != 2 || doc.Elements[0].Block != "Wall_1_1" ||
 		doc.Elements[0].Layer != "WALLS" || doc.Elements[1].Block != "ZONE_STAMP" {

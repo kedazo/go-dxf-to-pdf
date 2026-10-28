@@ -60,6 +60,9 @@ type wallStructure struct {
 	elements []XMLElement
 	polygons []rawPolygon
 	stamps   []rawStamp
+	openings []rawOpening // wallopenings.go
+	arcs     []rawArc
+	boxes    map[string]BBox // block-local extents of opening blocks
 }
 
 type rawPolygon struct {
@@ -79,8 +82,10 @@ type rawStamp struct {
 }
 
 // collectStructure walks one top-level entity (index elem) and everything it
-// inserts, appending closed polygons and attributed INSERTs to out.
-func collectStructure(out *wallStructure, ent dxf.Entity, elem int, layers map[string]dxf.Layer,
+// inserts, appending closed polygons, attributed INSERTs, door/window INSERTs
+// and their arcs to out. opening is the id of the enclosing opening INSERT
+// (-1 = none): an opening's own sub-blocks are never openings again.
+func collectStructure(out *wallStructure, ent dxf.Entity, elem, opening int, layers map[string]dxf.Layer,
 	blocks map[string]*dxf.Block, ctx drawCtx, flatTol float64) {
 
 	if ctx.depth > maxBlockDepth || !ent.IsVisible() || ctx.hidden(ent) {
@@ -137,12 +142,26 @@ func collectStructure(out *wallStructure, ent dxf.Entity, elem int, layers map[s
 			out.stamps = append(out.stamps, st)
 		}
 		if blk, ok := blocks[e.Name]; ok {
+			kind, isOpening := openingKind(e.Name, layer)
 			for _, local := range insertInstances(e, blk.BasePoint) {
 				cctx := ctx.inner(e, local)
+				child := opening
+				if opening < 0 && isOpening {
+					child = out.addOpening(e, blk, blocks, kind, layer, elem, cctx)
+				}
 				for _, be := range blk.Entities {
-					collectStructure(out, be, elem, layers, blocks, cctx, flatTol)
+					collectStructure(out, be, elem, child, layers, blocks, cctx, flatTol)
 				}
 			}
+		}
+
+	case *dxf.Arc:
+		// Door swings: every arc of an opening block, and loose arcs drawn on
+		// a door/window layer.
+		if opening >= 0 {
+			out.addArc(e, m, layer, elem, opening)
+		} else if _, ok := openingKind("", layer); ok {
+			out.addArc(e, m, layer, elem, -1)
 		}
 	}
 }

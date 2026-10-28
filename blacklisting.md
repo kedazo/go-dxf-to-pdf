@@ -173,6 +173,9 @@ SketchUp words (drop): glass, door, frame, fireplace, features, counters, electr
   floor, ceiling, plumbing
 Keep (never blacklist): wall, fal, a-cols, cols, column, oszlop, pillér, structure,
   structural, bearing, tartószerkezet, vázszerkezet, partition
+Axis lines + lightning protection / electrical (drop, 2026-10-28 -- a ZWCAD plan's
+  "Center" and "Villamvedelem" paired 0.175-0.25 m beside the walls and were taken for
+  walls): center, centre, tengely, axis, villám, villam
 ```
 
 Caution: keep matches win over drop matches (checked first), so `A-WALL` survives even if a

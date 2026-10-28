@@ -73,12 +73,14 @@ var defaultWallBlacklist = []string{
 	"casework", "q-cas", "q-spcq", "equipment", "eqpm",
 	// MEP — plumbing / electrical / mechanical
 	"sanr", "fixt", "plumb", "e-elec", "e-lite", "electrical", "lighting",
-	"hvac", "duct", "mech",
+	"hvac", "duct", "mech", "villám", "villam", // villámvédelem (lightning), villamos (electrical)
 	// annotation / dimensions / labels / symbols
 	"méretez", "dimension", "dims", "felirat", "címke", "label", "caption",
 	"tag", "note", "title", "jel -", "jel-", "metszet", "section", "marker",
 	"rajz és ábra", "symbol", "g-anno", "anno", "detl", "demo", "keyn", "iden",
 	"leader", "callout", "text", "stamp", "grid",
+	// axis / centre lines (pair up 0.2-0.5 m beside the wall they set out)
+	"center", "centre", "tengely", "axis",
 	// circulation symbols (stairs/ramps are not walls)
 	"strs", "stair", "ramp",
 	// openings (real geometry, but not walls)
@@ -172,6 +174,14 @@ type WallSegmentsResult struct {
 	UnitsOverridden   bool
 	UnitWarning       string // non-empty when units look unreliable (unitless, no override)
 	ThicknessClusters []ThicknessBin
+
+	// Door/window evidence (schema v3, wallopenings.go).
+	OpeningCount int
+	DoorCount    int
+	WindowCount  int
+	UnknownCount int
+	ArcCount     int
+	GapCount     int
 }
 
 // WallSegmentsDoc is the root of the emitted XML. Coordinates and lengths are in
@@ -181,6 +191,10 @@ type WallSegmentsResult struct {
 // Version 2 adds the drawing's own structure (wallstructure.go): elements,
 // closed polygons and attributed stamps, and an elem id on every segment.
 // Version 1 readers ignore the new elements and attributes.
+//
+// Version 3 adds door/window evidence (wallopenings.go): opening INSERTs at
+// any nesting depth, the arcs that may be their swings, an id on every wall
+// and the gaps mergeGroup bridged inside it. Additive: v2 readers ignore it.
 type WallSegmentsDoc struct {
 	XMLName  xml.Name     `xml:"wallExport"`
 	Version  string       `xml:"version,attr"`
@@ -190,6 +204,9 @@ type WallSegmentsDoc struct {
 	Walls    []XMLWall    `xml:"walls>wall"`
 	Polygons []XMLPolygon `xml:"polygons>polygon"`
 	Stamps   []XMLStamp   `xml:"stamps>stamp"`
+	Openings []XMLOpening `xml:"openings>opening"`
+	Arcs     []XMLArc     `xml:"arcs>arc"`
+	Gaps     []XMLGap     `xml:"gaps>gap"`
 }
 
 // XMLMeta records the coordinate convention and the mapping back to DXF space so
@@ -212,6 +229,9 @@ type XMLMeta struct {
 	PxPerMeter        float64 `xml:"pxPerMeter,attr"`        // pixels per scene meter in the PNG
 	SegmentCount      int     `xml:"segmentCount,attr"`      //
 	WallCount         int     `xml:"wallCount,attr"`         //
+	OpeningCount      int     `xml:"openingCount,attr"`      //
+	ArcCount          int     `xml:"arcCount,attr"`          //
+	GapCount          int     `xml:"gapCount,attr"`          //
 }
 
 // XMLSegment is a raw exploded line in scene-meters (debug/ground-truth).
@@ -229,7 +249,9 @@ type XMLSegment struct {
 }
 
 // XMLWall is a detected wall: a centerline plus a single thickness scalar.
+// ID is its index in <walls>, referenced by <gap wall>.
 type XMLWall struct {
+	ID         int     `xml:"id,attr"`
 	Layer      string  `xml:"layer,attr"`
 	X1         float64 `xml:"x1,attr"`
 	Y1         float64 `xml:"y1,attr"`
@@ -343,7 +365,7 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 		for j := first; j < len(raws); j++ {
 			raws[j].Elem = elem
 		}
-		collectStructure(&structure, entities[i], elem, layerMap, blockMap, structCtx, flatTol)
+		collectStructure(&structure, entities[i], elem, -1, layerMap, blockMap, structCtx, flatTol)
 	}
 
 	// DXF world -> scene meters (Y-down, PNG-aligned). Mirrors transform.go X/Y
@@ -375,11 +397,12 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 		})
 	}
 
-	walls := detectWalls(geoms, opts)
+	walls, gaps := detectWalls(geoms, opts)
 	polygons, stamps := structureXML(&structure, sx, sy)
+	openings, arcs := openingsXML(&structure, sx, sy, unitToMeters)
 
 	doc := WallSegmentsDoc{
-		Version: "2",
+		Version: "3",
 		Meta: XMLMeta{
 			Units:             "meters",
 			SourceUnits:       unitName,
@@ -400,12 +423,18 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 			PxPerMeter:   round6(opts.Scale * opts.DPI * 1000.0 / 25.4),
 			SegmentCount: len(segments),
 			WallCount:    len(walls),
+			OpeningCount: len(openings),
+			ArcCount:     len(arcs),
+			GapCount:     len(gaps),
 		},
 		Elements: structure.elements,
 		Segments: segments,
 		Walls:    walls,
 		Polygons: polygons,
 		Stamps:   stamps,
+		Openings: openings,
+		Arcs:     arcs,
+		Gaps:     gaps,
 	}
 
 	out, err := xml.MarshalIndent(doc, "", "  ")
@@ -418,7 +447,7 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 		return nil, err
 	}
 
-	return &WallSegmentsResult{
+	res := &WallSegmentsResult{
 		SegmentCount:      len(segments),
 		WallCount:         len(walls),
 		SceneWidthMeters:  doc.Meta.SceneWidthMeters,
@@ -427,7 +456,21 @@ func EmitWallSegments(inputPath, outPath string, opts WallSegmentsOptions) (*Wal
 		UnitsOverridden:   unitsOverridden,
 		UnitWarning:       unitWarning,
 		ThicknessClusters: thicknessClusters(walls, 5),
-	}, nil
+		OpeningCount:      len(openings),
+		ArcCount:          len(arcs),
+		GapCount:          len(gaps),
+	}
+	for _, o := range openings {
+		switch o.Kind {
+		case "door":
+			res.DoorCount++
+		case "window":
+			res.WindowCount++
+		default:
+			res.UnknownCount++
+		}
+	}
+	return res, nil
 }
 
 // thicknessClusters returns the top-n most common wall thicknesses (rounded to
@@ -568,8 +611,8 @@ func addArcChords(add func(x1, y1, x2, y2 float64, source string, isArc bool),
 
 // detectWalls runs the wall-pair heuristic on scene-meter segments and returns
 // detected walls (centerline + thickness), with collinear runs merged across
-// door/window gaps.
-func detectWalls(segs []segGeom, opts WallSegmentsOptions) []XMLWall {
+// door/window gaps, and the gaps it bridged.
+func detectWalls(segs []segGeom, opts WallSegmentsOptions) ([]XMLWall, []XMLGap) {
 	minWallLen := opts.MinWallLength // drop furniture ticks / short noise
 
 	type cand struct {
@@ -603,7 +646,7 @@ func detectWalls(segs []segGeom, opts WallSegmentsOptions) []XMLWall {
 		})
 	}
 	if len(cands) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Greedy: pair longer (more reliable) faces first.
@@ -699,8 +742,9 @@ func detectWalls(segs []segGeom, opts WallSegmentsOptions) []XMLWall {
 }
 
 // mergeCollinear groups pair-walls that lie on the same line and merges runs
-// whose end-to-start gap is within BridgeGap (bridging doors/windows).
-func mergeCollinear(pws []pairWall, opts WallSegmentsOptions) []XMLWall {
+// whose end-to-start gap is within BridgeGap (bridging doors/windows). Every
+// wall gets its index as ID; each bridged gap refers to its wall's ID.
+func mergeCollinear(pws []pairWall, opts WallSegmentsOptions) ([]XMLWall, []XMLGap) {
 	thickTol := opts.MergeGap
 	if thickTol < 0.02 {
 		thickTol = 0.02
@@ -708,6 +752,7 @@ func mergeCollinear(pws []pairWall, opts WallSegmentsOptions) []XMLWall {
 
 	merged := make([]bool, len(pws))
 	var walls []XMLWall
+	var gaps []XMLGap
 	for i := range pws {
 		if merged[i] {
 			continue
@@ -735,15 +780,28 @@ func mergeCollinear(pws []pairWall, opts WallSegmentsOptions) []XMLWall {
 			group = append(group, j)
 			merged[j] = true
 		}
-		walls = append(walls, mergeGroup(base, group, pws, opts)...)
+		gw, gg := mergeGroup(base, group, pws, opts)
+		for k := range gg {
+			gg[k].Wall += len(walls)
+		}
+		walls = append(walls, gw...)
+		gaps = append(gaps, gg...)
 	}
-	return walls
+	for i := range walls {
+		walls[i].ID = i
+	}
+	return walls, gaps
 }
+
+// minRecordedGap is the smallest bridged span recorded as a <gap> (m): below
+// it the faces merely don't quite meet.
+const minRecordedGap = 0.02
 
 // mergeGroup projects a group of collinear pair-walls onto the base line, sorts
 // them, and emits one wall per run separated by more than BridgeGap. Thickness
-// and perpendicular offset are length-weighted averages.
-func mergeGroup(base pairWall, group []int, pws []pairWall, opts WallSegmentsOptions) []XMLWall {
+// and perpendicular offset are length-weighted averages. The gaps a run
+// bridges come back with Wall = the index of their wall in the returned list.
+func mergeGroup(base pairWall, group []int, pws []pairWall, opts WallSegmentsOptions) ([]XMLWall, []XMLGap) {
 	ux, uy := base.ux, base.uy
 	ox, oy := base.x1, base.y1
 
@@ -770,6 +828,8 @@ func mergeGroup(base pairWall, group []int, pws []pairWall, opts WallSegmentsOpt
 	sort.Slice(ivs, func(i, j int) bool { return ivs[i].t0 < ivs[j].t0 })
 
 	var out []XMLWall
+	var gaps []XMLGap
+	var pending [][2]float64 // spans the current run bridged, in base-line t
 	var (
 		ct0, ct1  float64
 		cWeight   float64
@@ -818,8 +878,21 @@ func mergeGroup(base pairWall, group []int, pws []pairWall, opts WallSegmentsOpt
 		x2 := ox + ct1*ux + avgPerp*uy
 		y2 := oy + ct1*uy - avgPerp*ux
 		L := math.Hypot(x2-x1, y2-y1)
+		spans := pending
+		pending = nil
 		if L < 0.05 {
 			return
+		}
+		for _, sp := range spans {
+			gaps = append(gaps, XMLGap{
+				Wall: len(out),
+				T0:   round6(sp[0] - ct0),
+				T1:   round6(sp[1] - ct0),
+				X1:   round6(ox + sp[0]*ux + avgPerp*uy),
+				Y1:   round6(oy + sp[0]*uy - avgPerp*ux),
+				X2:   round6(ox + sp[1]*ux + avgPerp*uy),
+				Y2:   round6(oy + sp[1]*uy - avgPerp*ux),
+			})
 		}
 		out = append(out, XMLWall{
 			Layer:      cLayer,
@@ -836,11 +909,13 @@ func mergeGroup(base pairWall, group []int, pws []pairWall, opts WallSegmentsOpt
 	for _, v := range ivs {
 		if active && v.t0 > ct1+opts.BridgeGap {
 			flush()
+		} else if active && v.t0 > ct1+minRecordedGap {
+			pending = append(pending, [2]float64{ct1, v.t0})
 		}
 		addIv(v)
 	}
 	flush()
-	return out
+	return out, gaps
 }
 
 // canonicalAngle returns the orientation of a direction folded to [0,180) degrees

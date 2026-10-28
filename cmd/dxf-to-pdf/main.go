@@ -221,6 +221,8 @@ func main() {
 		fmt.Printf("  scene:    %.2f x %.2f m  (units: %s)\n",
 			res.SceneWidthMeters, res.SceneHeightMeters, res.Units)
 		fmt.Printf("  segments: %d   walls: %d\n", res.SegmentCount, res.WallCount)
+		fmt.Printf("  openings: %d (doors %d, windows %d, unknown %d)   swing arcs: %d   bridged gaps: %d\n",
+			res.OpeningCount, res.DoorCount, res.WindowCount, res.UnknownCount, res.ArcCount, res.GapCount)
 		if len(res.ThicknessClusters) > 0 {
 			parts := make([]string, 0, len(res.ThicknessClusters))
 			for _, b := range res.ThicknessClusters {

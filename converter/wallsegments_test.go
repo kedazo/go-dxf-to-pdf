@@ -263,3 +263,25 @@ func TestEmitWallSegmentsBlacklist(t *testing.T) {
 		t.Errorf("walls with WallLayers=[wall] = %+v, want 1 on A-WALL", white.Walls)
 	}
 }
+
+// Axis lines and lightning-protection runs follow the walls 0.2-0.5 m off and
+// pair up like faces (a ZWCAD plan's "Center" and "Villamvedelem"); a wall layer
+// naming one of them still counts.
+func TestWallLayerEligibleAxesAndLightning(t *testing.T) {
+	for layer, want := range map[string]bool{
+		"Center":         false,
+		"A-GRID-CENTRE":  false,
+		"Tengelyek":      false,
+		"Villamvedelem":  false,
+		"Villámvédelem":  false,
+		"Villamos":       false,
+		"Fal":            true,
+		"Fal_szaggatott": true,
+		"A-WALL-CENTER":  true,
+		"Vázszerkezet":   true,
+	} {
+		if got := wallLayerEligible(layer, WallSegmentsOptions{}); got != want {
+			t.Errorf("wallLayerEligible(%q) = %v, want %v", layer, got, want)
+		}
+	}
+}
