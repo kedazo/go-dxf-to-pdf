@@ -60,7 +60,8 @@ func TestRenderViewport(t *testing.T) {
 	r := NewRenderer(paper, false, 0, "")
 	r.SetTransform(NewTransform(BBox{MaxX: 100, MaxY: 100}, 1, paper, 0, AlignTopLeft, false))
 	ctx := plotted(nil, layers)
-	ctx.vp = &viewportSource{entities: []dxf.Entity{model}, boxes: entityBoxes([]dxf.Entity{model}, nil, nil, layers)}
+	ctx.vp = &viewportSource{entities: []dxf.Entity{model}, boxes: entityBoxes([]dxf.Entity{model}, nil, nil, layers),
+		shown: map[*dxf.Viewport]bool{v: true}}
 	renderEntity(r, v, layers, nil, ctx)
 	r.flush()
 
@@ -69,6 +70,27 @@ func TestRenderViewport(t *testing.T) {
 	b := r.c.Bounds() // canvas-native Y-up
 	if math.Abs(b.X0-50) > 0.5 || math.Abs(b.X1-50) > 0.5 || math.Abs(b.Y0-40) > 0.5 || math.Abs(b.Y1-60) > 0.5 {
 		t.Errorf("drawn bounds %v, want the vertical x=50, y 40..60", b)
+	}
+}
+
+// Viewports with IDs: ID 1 is the paper space view, status 0 is off. A DWG
+// layout that wasn't active comes without IDs and status (LibreDWG writes 0):
+// the first viewport is then the paper space view, the others show.
+func TestModelViewports(t *testing.T) {
+	vp := func(id, status int16) *dxf.Viewport {
+		v := dxf.NewViewport()
+		v.ID, v.Status = id, status
+		return v
+	}
+	paper, on, off := vp(1, 1), vp(2, 2), vp(3, 0)
+	if got := modelViewports([]dxf.Entity{paper, on, off}); len(got) != 1 || got[0] != on {
+		t.Errorf("with IDs: %v, want only the viewport that is on", got)
+	}
+
+	paper, a, b := vp(0, 0), vp(0, 0), vp(0, 0)
+	b.SetIsTurnedOff(true)
+	if got := modelViewports([]dxf.Entity{paper, dxf.NewLine(), a, b}); len(got) != 1 || got[0] != a {
+		t.Errorf("without IDs: %v, want the second viewport", got)
 	}
 }
 

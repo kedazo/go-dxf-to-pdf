@@ -176,6 +176,16 @@ func TestTextExtentsInBBox(t *testing.T) {
 		t.Errorf("centered two-line MTEXT bbox = %+v, want around the anchor", bb)
 	}
 
+	// A float-noise box width (ZWCAD) is no box, not ~1e12 wrapped lines.
+	mt = dxf.NewMText()
+	mt.Text = "+10,4"
+	mt.InitialTextHeight = 600
+	mt.ReferenceRectangleWidth = 1.818989403545856e-12
+	bb = ComputeBoundingBox([]dxf.Entity{mt}, nil)
+	if bb.MinY < -1000 {
+		t.Errorf("MTEXT with a 1.8e-12 box bbox = %+v, want one line high", bb)
+	}
+
 	// Rotated 90°: the text runs up from the anchor.
 	txt.Rotation = 90
 	bb = ComputeBoundingBox([]dxf.Entity{txt}, nil)

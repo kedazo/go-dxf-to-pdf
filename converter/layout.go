@@ -113,12 +113,34 @@ func savedLayout(d *dxf.Drawing, name string) (*dxf.Layout, error) {
 	if l == nil {
 		return nil, nil
 	}
-	for _, e := range d.LayoutEntities(l) {
-		if v, ok := e.(*dxf.Viewport); ok && !v.IsPaperSpaceView() && v.IsOn() {
-			return l, nil
-		}
+	if len(modelViewports(d.LayoutEntities(l))) > 0 {
+		return l, nil
 	}
 	return nil, nil
+}
+
+// modelViewports returns a layout's viewports that show model space: not
+// the paper space view (ID 1) and not turned off. DWG files don't store the
+// viewport IDs and stacking status; LibreDWG derives them for the active
+// layout only and writes 0 for the other layouts' viewports, so in a layout
+// without any ID the first viewport is the paper space view and only the
+// off flag counts.
+func modelViewports(entities []dxf.Entity) []*dxf.Viewport {
+	var all []*dxf.Viewport
+	noIDs := true
+	for _, e := range entities {
+		if v, ok := e.(*dxf.Viewport); ok {
+			all = append(all, v)
+			noIDs = noIDs && v.ID == 0
+		}
+	}
+	var out []*dxf.Viewport
+	for i, v := range all {
+		if noIDs && i > 0 && !v.IsTurnedOff() || !noIDs && !v.IsPaperSpaceView() && v.IsOn() {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // layoutInfos describes the paper space layouts of d.
@@ -132,13 +154,11 @@ func layoutInfos(d *dxf.Drawing) []LayoutInfo {
 		}
 		w, h := layoutPaper(l)
 		info := LayoutInfo{Name: l.Name, Active: l == active && !d.Header.PreviousReleaseTileCompatability, Width: w, Height: h}
-		for _, e := range entities {
-			if v, ok := e.(*dxf.Viewport); ok && !v.IsPaperSpaceView() {
-				info.Viewports = append(info.Viewports, ViewportInfo{
-					Scale: v.Scale(), TwistDeg: v.TwistAngle, Clipped: v.IsNonRectangularClipping(),
-					FrozenLayers: len(v.FrozenLayerHandles),
-				})
-			}
+		for _, v := range modelViewports(entities) {
+			info.Viewports = append(info.Viewports, ViewportInfo{
+				Scale: v.Scale(), TwistDeg: v.TwistAngle, Clipped: v.IsNonRectangularClipping(),
+				FrozenLayers: len(v.FrozenLayerHandles),
+			})
 		}
 		out = append(out, info)
 	}
@@ -186,11 +206,16 @@ func convertLayout(d *dxf.Drawing, l *dxf.Layout, outPath string, opts Options,
 
 	model := modelSpace(d.Entities)
 	ctx := plotted(sel, layers)
+	shown := map[*dxf.Viewport]bool{}
+	for _, v := range modelViewports(paperEntities) {
+		shown[v] = true
+	}
 	ctx.vp = &viewportSource{
 		drawing:   d,
 		entities:  model,
 		boxes:     entityBoxes(model, blocks, sel, layers),
 		psLTScale: d.Header.ScaleLineTypesInPaperspace,
+		shown:     shown,
 	}
 	// Only the sheet plots (ArchiCAD leaves title blocks far off it).
 	r.SetClipRect(0, 0, w, h)
@@ -208,8 +233,9 @@ func convertLayout(d *dxf.Drawing, l *dxf.Layout, outPath string, opts Options,
 type viewportSource struct {
 	drawing   *dxf.Drawing
 	entities  []dxf.Entity
-	boxes     []BBox // model extents of entities, for culling
-	psLTScale bool   // $PSLTSCALE: line type patterns in paper units
+	boxes     []BBox                 // model extents of entities, for culling
+	psLTScale bool                   // $PSLTSCALE: line type patterns in paper units
+	shown     map[*dxf.Viewport]bool // the layout's modelViewports
 }
 
 // affineOf takes the plan (x, y) part of a 3D matrix.
@@ -233,7 +259,7 @@ func (m affine) inverse() affine {
 // renderViewport draws the model space through a viewport on the sheet.
 func renderViewport(r *Renderer, v *dxf.Viewport, layers map[string]dxf.Layer, blocks map[string]*dxf.Block, ctx drawCtx) {
 	src := ctx.vp
-	if src == nil || v.IsPaperSpaceView() || !v.IsOn() || v.Scale() == 0 {
+	if src == nil || !src.shown[v] || v.Scale() == 0 {
 		return
 	}
 	// Outline on the sheet; curves flattened to ~0.05 mm on paper.

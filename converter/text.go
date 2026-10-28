@@ -98,9 +98,10 @@ func expandTextLine(bb *BBox, t affine, value string, height, widthFactor float6
 // mtextBoxWidth returns the width an MTEXT's lines wrap at, in drawing
 // units (0 = no box). The dxf package reads a missing group 41 as 1.0 (its
 // default), which would wrap after every word, so exactly 1.0 counts as no
-// box too.
+// box too. CAD apps also save a cleared width as float noise (ZWCAD:
+// 1.8e-12), which would estimate ~1e15 wrapped lines, so tiny widths are 0.
 func mtextBoxWidth(e *dxf.MText) float64 {
-	if w := e.ReferenceRectangleWidth; w > 0 && w != 1 {
+	if w := e.ReferenceRectangleWidth; w > 1e-6 && w != 1 {
 		return w
 	}
 	return 0
