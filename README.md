@@ -47,6 +47,9 @@ dxf-to-pdf input.dxf output.pdf --scale 1:1 --layers "Walls,Doors"
 # Tile across multiple pages
 dxf-to-pdf input.dxf output.pdf --scale 1:1 --paper A4 --tile
 
+# Draw all colors black (monochrome printing; alias: --black)
+dxf-to-pdf input.dxf output.pdf --scale 1:100 --monochrome
+
 # Inspect drawing metadata
 dxf-to-pdf input.dxf --info
 dxf-to-pdf input.dxf --list-layers
@@ -66,6 +69,7 @@ dxf-to-pdf input.dxf --emit-wall-segments walls.xml --scale 1:100
 | `--align` | `center` | Drawing alignment: `center`, `bottom-left`, `top-left` |
 | `--layers` | *(all)* | Include only these layers (comma-separated) |
 | `--tile` | | Tile drawing across multiple pages |
+| `--monochrome` | | Draw all vector content in black (alias: `--black`); raster images and wipeout masks keep their colors |
 | `--crop` | | Crop to bounding box: `minX,minY,maxX,maxY` |
 | `--dwg-2-dxf` | *(auto)* | Path to `dwg2dxf` binary |
 | `--font-dir` | *(see below)* | Directory containing DejaVuSans*.ttf font files |

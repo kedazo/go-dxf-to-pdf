@@ -33,6 +33,7 @@ type Renderer struct {
 	pageW      float64
 	pageH      float64
 	color      color.RGBA // current entity color (used for text)
+	monochrome bool       // draw all drawing content in black
 	clip       *canvas.Rect // page-space clip rectangle (tiled output), nil = none
 
 	// Stroke batching (see SetBatching, and SetRasterStrokes for raster
@@ -290,6 +291,20 @@ func (r *Renderer) SetTransform(t Transform) {
 func (r *Renderer) SetBatching(on bool) {
 	r.flush()
 	r.batch = on
+}
+
+// SetMonochrome draws all drawing content in black. Paper-color masks
+// (WIPEOUT), raster images, and tool overlays keep their colors.
+func (r *Renderer) SetMonochrome(on bool) {
+	r.monochrome = on
+}
+
+// plotRGB returns col, or black for monochrome output.
+func (r *Renderer) plotRGB(col RGB) RGB {
+	if r.monochrome {
+		return RGB{}
+	}
+	return col
 }
 
 // SetRasterStrokes makes the renderer outline strokes itself, for raster
@@ -1181,6 +1196,9 @@ func (r *Renderer) DrawMText(x, y float64, segments []MTextSegment, defaultHeigh
 		textColor := r.color
 		if seg.Style.HasColor {
 			textColor = color.RGBA{uint8(seg.Style.ColorR), uint8(seg.Style.ColorG), uint8(seg.Style.ColorB), 255}
+		}
+		if r.monochrome {
+			textColor = color.RGBA{A: 255}
 		}
 		// Without \W and \Q the text style's width factor and slant apply; a
 		// relative \W…x multiplies the style's factor.

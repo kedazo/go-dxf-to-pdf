@@ -363,7 +363,7 @@ func renderMLeader(r *Renderer, e *dxf.MLeader, layers map[string]dxf.Layer, blo
 	lineRGB, arrowSize, arrowBlock := rgb, e.ArrowSize, ""
 	if hasStyle {
 		lookPtr = &look
-		lineRGB = objectColorRGB(look.lineColor, rgb)
+		lineRGB = r.plotRGB(objectColorRGB(look.lineColor, rgb))
 		if arrowSize <= 0 {
 			arrowSize = look.arrowSize * mleaderScale(e)
 		}

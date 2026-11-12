@@ -29,6 +29,7 @@ type CLI struct {
 	Format      string   `optional:"" help:"Output format: pdf, png, jpg (default: auto from file extension)."`
 	DPI         float64  `default:"300" help:"DPI for raster output (PNG/JPG). Default: 300."`
 	Transparent bool     `help:"Transparent PNG background (useful for layer compositing)."`
+	Monochrome  bool     `aliases:"black" help:"Draw all drawing colors in black (raster images and wipeout masks keep their colors)."`
 	Info        bool     `help:"Print drawing info (units, size, entity count, blocks) and exit."`
 	ListLayers  bool     `help:"List all layers and exit."`
 
@@ -257,6 +258,7 @@ func main() {
 		Format:      cli.Format,
 		DPI:         cli.DPI,
 		Transparent: cli.Transparent,
+		Monochrome:  cli.Monochrome,
 		Layout:      cli.Layout,
 	})
 	if err != nil {

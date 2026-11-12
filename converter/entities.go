@@ -503,6 +503,7 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 	}
 
 	rgb, lw := resolveStyle(ent, layers, ctx)
+	rgb = r.plotRGB(rgb)
 	m := ctx.m
 	if pattern := r.lineTypes.pattern(ctx.lineTypeName(ent, layers)); pattern != nil {
 		// Linetypes scale with the drawing, the entity and the block it is in.
@@ -670,7 +671,7 @@ func renderEntity(r *Renderer, ent dxf.Entity, layers map[string]dxf.Layer,
 					world[i][j] = [2]float64{x, y}
 				}
 			}
-			r.FillPolygons(world, hatchFillColor(e, rgb))
+			r.FillPolygons(world, r.plotRGB(hatchFillColor(e, rgb)))
 		} else if len(e.PatternLines) > 0 {
 			r.SetStyle(rgb, 0.05) // thin lines for hatch fill
 			lines := r.hatchLines(e, dotLen, tolerance)
