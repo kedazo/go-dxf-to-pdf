@@ -28,6 +28,7 @@ type Options struct {
 	Format      string  // output format: "pdf", "png", "jpg" (default: auto from extension)
 	DPI         float64 // raster output DPI (default: 300)
 	Transparent bool    // transparent PNG background (default: false)
+	Monochrome  bool    // draw all drawing content in black
 	Layout      string  // paper space layout to plot; "model" = model space; "" = the layout the drawing was saved on, if any
 }
 
@@ -371,6 +372,7 @@ func convertDrawing(drawing *dxf.Drawing, pdfPath string, opts Options, images m
 	leaderArrows := newLeaderArrows(drawing)
 	newRenderer := func(paper PaperSize, landscape bool) *Renderer {
 		r := NewRenderer(paper, landscape, margin, opts.FontDir)
+		r.SetMonochrome(opts.Monochrome)
 		r.SetBatching(true)
 		r.SetLineTypes(lineTypes)
 		r.SetTextStyles(drawing.Styles)

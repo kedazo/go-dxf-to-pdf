@@ -312,6 +312,7 @@ func renderViewport(r *Renderer, v *dxf.Viewport, layers map[string]dxf.Layer, b
 	// bordered by their clip boundary entity, drawn on its own).
 	if !v.IsNonRectangularClipping() && ctx.keeps(v) && !ctx.hidden(v) {
 		rgb, lw := resolveStyle(v, layers, ctx)
+		rgb = r.plotRGB(rgb)
 		r.SetStyle(rgb, lw)
 		pts := make([][2]float64, len(outline))
 		for i, p := range outline {
